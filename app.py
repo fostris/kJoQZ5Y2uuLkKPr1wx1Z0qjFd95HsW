@@ -13,6 +13,7 @@ from pathlib import Path
 from analytics.bonds import calculate_weighted_ytm, calculate_weighted_years_to_maturity
 from analytics.cashflows import build_coupon_cashflow_by_month, build_maturity_ladder
 from analytics.data_quality import build_attention_list, build_bond_data_quality_report
+from analytics.decision_scenarios import build_buy_candidates, get_exclusion_reason_label
 from analytics.ratings import (
     RATING_BUCKETS,
     RATING_BUCKET_UNRATED,
@@ -305,6 +306,11 @@ data_quality_report = build_bond_data_quality_report(
     amortizations=[dict(row) for row in bond_amortizations],
     bond_asset_types=BOND_ASSET_TYPES,
 )
+data_quality_issue_isins = {
+    str(row.get("isin")).upper()
+    for row in data_quality_report.get("bonds", [])
+    if isinstance(row.get("isin"), str) and row.get("isin")
+}
 cashflow_12m_report = build_coupon_cashflow_by_month(
     coupons=[dict(row) for row in coupon_calendar],
     positions=pos_list,
@@ -2374,6 +2380,10 @@ with tab_rebalance:
     else:
         # Текущее распределение
         type_agg_reb, total_portfolio_reb = build_current_allocation(pos_df, TYPE_LABELS)
+        current_type_pct = {
+            str(row["asset_type"]): float(row["current_pct"])
+            for _, row in type_agg_reb.iterrows()
+        }
 
         # Загрузка целевых долей из БД
         saved_targets = db.get_rebalance_targets()
@@ -2500,6 +2510,173 @@ with tab_rebalance:
                             f"**{row['Тип']}**: докупить на **{fmt(abs(row['Отклонение ₽']))} ₽** "
                             f"({row['Текущая %']:.1f}% → {row['Целевая %']:.1f}%)"
                         )
+
+        st.divider()
+        st.markdown("### 🧭 Сценарий: что докупить (rule-based)")
+        st.caption(
+            "Список ниже — это только варианты «можно рассмотреть», а не инвестиционная рекомендация. "
+            "Автоматические покупки не выполняются."
+        )
+
+        sc_col1, sc_col2, sc_col3 = st.columns(3)
+        with sc_col1:
+            scenario_free_cash = st.number_input(
+                "Свободная сумма, ₽",
+                min_value=0.0,
+                value=50_000.0,
+                step=1_000.0,
+                key="buy_scenario_free_cash",
+            )
+            scenario_min_ytm = st.number_input(
+                "Минимальная YTM, %",
+                min_value=0.0,
+                max_value=50.0,
+                value=12.0,
+                step=0.1,
+                key="buy_scenario_min_ytm",
+            )
+        with sc_col2:
+            scenario_max_issuer_share = st.number_input(
+                "Макс доля эмитента, %",
+                min_value=1.0,
+                max_value=100.0,
+                value=10.0,
+                step=0.5,
+                key="buy_scenario_max_issuer_share",
+            )
+            scenario_max_years_to_maturity = st.number_input(
+                "Макс срок до погашения, лет",
+                min_value=0.5,
+                max_value=50.0,
+                value=7.0,
+                step=0.5,
+                key="buy_scenario_max_years_to_maturity",
+            )
+        with sc_col3:
+            scenario_max_position_share = st.number_input(
+                "Макс доля позиции, %",
+                min_value=1.0,
+                max_value=100.0,
+                value=10.0,
+                step=0.5,
+                key="buy_scenario_max_position_share",
+            )
+            scenario_exclude_without_ytm = st.checkbox(
+                "Исключать бумаги без YTM",
+                value=True,
+                key="buy_scenario_exclude_without_ytm",
+            )
+            scenario_exclude_without_maturity = st.checkbox(
+                "Исключать бумаги без даты погашения",
+                value=True,
+                key="buy_scenario_exclude_without_maturity",
+            )
+
+        buy_scenario = build_buy_candidates(
+            positions=pos_list,
+            free_cash=float(scenario_free_cash),
+            issuer_by_isin=issuer_by_isin,
+            ytm_by_isin=ytm_by_isin,
+            maturity_by_isin=maturity_by_isin,
+            position_share_map=position_share_map,
+            issuer_share_map=issuer_share_map,
+            current_type_pct=current_type_pct,
+            target_type_pct={k: float(v) for k, v in new_targets.items()},
+            total_portfolio_value=float(concentration_metrics.get("total_portfolio_value") or 0.0),
+            max_issuer_share=float(scenario_max_issuer_share) / 100.0,
+            max_position_share=float(scenario_max_position_share) / 100.0,
+            min_ytm=float(scenario_min_ytm),
+            max_years_to_maturity=float(scenario_max_years_to_maturity),
+            exclude_without_ytm=bool(scenario_exclude_without_ytm),
+            exclude_without_maturity=bool(scenario_exclude_without_maturity),
+            bond_asset_types=BOND_ASSET_TYPES,
+            warning_share_threshold=ATTENTION_CONCENTRATION_THRESHOLD,
+            data_quality_issue_isins=data_quality_issue_isins,
+            as_of_date=date.today(),
+            max_candidates=10,
+        )
+
+        scenario_candidates = buy_scenario.get("candidates", [])
+        if scenario_candidates:
+            candidates_df = pd.DataFrame(scenario_candidates).copy()
+            candidates_df["Тип"] = candidates_df["asset_type"].map(TYPE_LABELS).fillna(candidates_df["asset_type"])
+            candidates_df["YTM"] = candidates_df["ytm"].apply(
+                lambda value: f"{value:.2f}%" if value is not None else "нет данных"
+            )
+            candidates_df["Лет до погашения"] = candidates_df["years_to_maturity"].apply(
+                lambda value: f"{value:.2f}" if value is not None else "нет данных"
+            )
+            candidates_df["Доля позиции %"] = candidates_df["position_share"].apply(
+                lambda value: value * 100 if value is not None else None
+            )
+            candidates_df["Доля эмитента %"] = candidates_df["issuer_share"].apply(
+                lambda value: value * 100 if value is not None else None
+            )
+            candidates_df["После покупки: доля позиции %"] = candidates_df["projected_position_share"].apply(
+                lambda value: value * 100 if value is not None else None
+            )
+            candidates_df["После покупки: доля эмитента %"] = candidates_df["projected_issuer_share"].apply(
+                lambda value: value * 100 if value is not None else None
+            )
+            candidates_df["Отклонение от цели, п.п."] = candidates_df["target_gap_pct"]
+            candidates_df["Ориентир суммы, ₽"] = candidates_df["suggested_amount"]
+            candidates_df["Предупреждения"] = candidates_df["warnings"].apply(
+                lambda items: "нет" if not items else "; ".join(items)
+            )
+            candidates_df = candidates_df.rename(
+                columns={
+                    "name": "Инструмент",
+                    "isin": "ISIN",
+                    "issuer": "Эмитент",
+                    "explanation": "Обоснование",
+                }
+            )
+
+            st.dataframe(
+                candidates_df[
+                    [
+                        "Инструмент",
+                        "ISIN",
+                        "Тип",
+                        "Эмитент",
+                        "YTM",
+                        "Лет до погашения",
+                        "Доля позиции %",
+                        "Доля эмитента %",
+                        "После покупки: доля позиции %",
+                        "После покупки: доля эмитента %",
+                        "Отклонение от цели, п.п.",
+                        "Ориентир суммы, ₽",
+                        "Предупреждения",
+                        "Обоснование",
+                    ]
+                ],
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Доля позиции %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Доля эмитента %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "После покупки: доля позиции %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "После покупки: доля эмитента %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Отклонение от цели, п.п.": st.column_config.NumberColumn(format="%+.2f"),
+                    "Ориентир суммы, ₽": st.column_config.NumberColumn(format="%.2f ₽"),
+                },
+            )
+        else:
+            st.warning("По заданным ограничениям кандидаты не найдены.")
+
+        excluded_summary = buy_scenario.get("excluded_summary", [])
+        if excluded_summary:
+            summary_df = pd.DataFrame(excluded_summary).copy()
+            summary_df["Причина"] = summary_df["reason_code"].apply(get_exclusion_reason_label)
+            summary_df = summary_df.rename(columns={"count": "Количество"})
+            st.caption("Почему бумаги были исключены из сценария:")
+            st.dataframe(
+                summary_df[["Причина", "Количество"]],
+                hide_index=True,
+                use_container_width=True,
+                column_config={"Количество": st.column_config.NumberColumn(format="%d")},
+            )
 
         # Конкретные позиции для ребалансировки (по самым крупным отклонениям)
         if not underweight.empty:
