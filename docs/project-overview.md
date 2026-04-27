@@ -257,6 +257,7 @@ UI реализован в одном файле `app.py` как набор вк
 - [tests/test_data_sync_status.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_data_sync_status.py:1): SQL-обвязка `data_sync_status`, агрегация свежести и сохранение истории ошибок.
 - [tests/test_db_migrations.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_db_migrations.py:1): применение миграций на новой/старой БД и идемпотентность повторного запуска.
 - [tests/test_parser.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_parser.py:1): базовый парсинг HTML-отчёта, включая даты, позиции/НКД, сделки, денежные потоки, пополнения и неполные таблицы.
+- [tests/test_db_integration.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_db_integration.py:1): интеграционные проверки `db.py` на временной SQLite БД (схема, импорт отчёта, upsert-операции, чтение позиций и cost basis).
 
 Чем запускать:
 - `python -m unittest discover -s tests -v`
@@ -266,12 +267,13 @@ UI реализован в одном файле `app.py` как набор вк
 - YTM-парсинг, retry/backoff и статусы свежести синхронизации MOEX;
 - SQL-функции свежести `data_sync_status`;
 - миграции БД (`schema_migrations`, `apply_migrations`, `get_schema_version`);
-- базовые сценарии парсинга `parser.py` на синтетических fixtures.
+- базовые сценарии парсинга `parser.py` на синтетических fixtures;
+- базовые интеграционные сценарии `db.py` на временной БД (без изменения `portfolio.db`).
 
 Не покрыто (по текущему коду):
 - `app.py` (UI-ветки, визуализация, интеграционные сценарии);
 - `parser.py` (расширенные/реальные HTML-краевые случаи и вариативность вёрстки);
-- большая часть `db.py` (кроме `data_sync_status`);
+- часть `db.py` (не покрыты все CRUD-ветки и сложные сценарии расчёта cost basis из сделок);
 - `fetch_gmail.py` и сетевые сценарии MOEX.
 
 Как добавить новый тест:

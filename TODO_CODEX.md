@@ -880,20 +880,18 @@ Note (2026-04-27): added parser fixtures with synthetic data (`minimal_report.ht
 
 ## 6.5. Добавить тесты БД
 
-Status (2026-04-27): in progress.
-
 Что сделать:
 
-- [ ] Создать `tests/test_db_integration.py`.
-- [ ] Использовать временную SQLite БД.
-- [ ] Проверить:
+- [x] Создать `tests/test_db_integration.py`.
+- [x] Использовать временную SQLite БД.
+- [x] Проверить:
   - создание схемы;
   - импорт отчёта;
   - upsert купона;
   - upsert погашения;
   - cost basis;
   - чтение позиций.
-- [ ] Не использовать реальный `portfolio.db`.
+- [x] Не использовать реальный `portfolio.db`.
 
 Сложность: средняя  
 Ценность: высокая  
@@ -901,15 +899,19 @@ Status (2026-04-27): in progress.
 
 Критерии готовности:
 
-- [ ] Тесты используют временную БД.
-- [ ] Реальная база не изменяется.
-- [ ] Тесты можно запускать командой `python -m unittest discover -s tests -v`.
+- [x] Тесты используют временную БД.
+- [x] Реальная база не изменяется.
+- [x] Тесты можно запускать командой `python -m unittest discover -s tests -v`.
+
+Note (2026-04-27): added `tests/test_db_integration.py` with temporary SQLite DB setup and checks for schema creation, report import + positions read, coupon/maturity upsert behavior, and cost-basis map updates.
 
 ---
 
 # Этап 7. Риск-метрики второго уровня
 
 ## 7.1. Добавить справочник эмитентов
+
+Status (2026-04-27): in progress.
 
 Описание:
 
@@ -1226,7 +1228,7 @@ Status (2026-04-27): in progress.
 - [x] 6.2 Timestamp свежести данных.
 - [x] 6.3 Миграции БД.
 - [x] 6.4 Тесты парсера.
-- [ ] 6.5 Тесты БД.
+- [x] 6.5 Тесты БД.
 
 ## Sprint 5 — справочники и риск
 
