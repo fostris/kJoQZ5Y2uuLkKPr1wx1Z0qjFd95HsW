@@ -172,3 +172,75 @@ def plot_coupon_cashflow_by_month(cashflow_df: pd.DataFrame) -> dict[str, Any]:
     )
 
     return {"figure": fig, "dataframe": source}
+
+
+def plot_maturity_ladder(ladder_df: pd.DataFrame) -> dict[str, Any]:
+    """Stacked bar chart for yearly maturity/amortization ladder."""
+    source = ladder_df.copy() if ladder_df is not None else pd.DataFrame()
+    if source.empty:
+        return {"figure": None, "dataframe": source}
+
+    defaults = {
+        "year": None,
+        "maturity_return": 0.0,
+        "amortization_return": 0.0,
+        "total_return": 0.0,
+    }
+    for column, default_value in defaults.items():
+        if column not in source.columns:
+            source[column] = default_value
+
+    source["year"] = pd.to_numeric(source["year"], errors="coerce")
+    source["maturity_return"] = pd.to_numeric(source["maturity_return"], errors="coerce").fillna(0.0)
+    source["amortization_return"] = pd.to_numeric(source["amortization_return"], errors="coerce").fillna(0.0)
+    source["total_return"] = pd.to_numeric(source["total_return"], errors="coerce").fillna(
+        source["maturity_return"] + source["amortization_return"]
+    )
+
+    source = source[source["year"].notna()].sort_values("year").copy()
+    if source.empty:
+        return {"figure": None, "dataframe": source}
+
+    source["year"] = source["year"].astype(int)
+    source["year_str"] = source["year"].astype(str)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=source["year_str"],
+            y=source["maturity_return"],
+            name="Погашения",
+            marker_color="#a78bfa",
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            x=source["year_str"],
+            y=source["amortization_return"],
+            name="Амортизации",
+            marker_color="#22d3ee",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=source["year_str"],
+            y=source["total_return"],
+            name="Итого возврат",
+            mode="lines+markers+text",
+            line=dict(color="#f59e0b", width=2),
+            text=source["total_return"].apply(lambda v: f"{v:,.0f} ₽"),
+            textposition="top center",
+        )
+    )
+    fig.update_layout(
+        barmode="stack",
+        xaxis_title="Год",
+        yaxis_title="₽",
+        height=340,
+        margin=dict(t=20, b=40),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", y=1.1),
+    )
+
+    return {"figure": fig, "dataframe": source}

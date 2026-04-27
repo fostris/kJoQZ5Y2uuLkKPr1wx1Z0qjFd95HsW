@@ -2,7 +2,7 @@ import unittest
 
 import pandas as pd
 
-from ui.charts import plot_coupon_cashflow_by_month, plot_ytm_vs_maturity
+from ui.charts import plot_coupon_cashflow_by_month, plot_maturity_ladder, plot_ytm_vs_maturity
 
 
 class YtmVsMaturityChartTests(unittest.TestCase):
@@ -109,6 +109,29 @@ class CouponCashflowChartTests(unittest.TestCase):
 
     def test_empty_dataframe_returns_none_figure(self):
         result = plot_coupon_cashflow_by_month(pd.DataFrame())
+
+        self.assertIsNone(result["figure"])
+        self.assertTrue(result["dataframe"].empty)
+
+
+class MaturityLadderChartTests(unittest.TestCase):
+    def test_plot_maturity_ladder_sorts_by_year_and_keeps_series(self):
+        ladder_df = pd.DataFrame(
+            [
+                {"year": 2028, "maturity_return": 6000.0, "amortization_return": 0.0, "total_return": 6000.0},
+                {"year": 2026, "maturity_return": 0.0, "amortization_return": 2000.0, "total_return": 2000.0},
+                {"year": 2027, "maturity_return": 0.0, "amortization_return": 2000.0, "total_return": 2000.0},
+            ]
+        )
+
+        result = plot_maturity_ladder(ladder_df)
+
+        self.assertIsNotNone(result["figure"])
+        self.assertEqual(list(result["dataframe"]["year"]), [2026, 2027, 2028])
+        self.assertEqual([trace.name for trace in result["figure"].data], ["Погашения", "Амортизации", "Итого возврат"])
+
+    def test_plot_maturity_ladder_empty_returns_none(self):
+        result = plot_maturity_ladder(pd.DataFrame())
 
         self.assertIsNone(result["figure"])
         self.assertTrue(result["dataframe"].empty)

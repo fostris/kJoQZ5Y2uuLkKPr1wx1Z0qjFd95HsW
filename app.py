@@ -52,7 +52,7 @@ from rebalancing import (
     build_rebalance_comparison,
     split_rebalance_gaps,
 )
-from ui.charts import plot_coupon_cashflow_by_month, plot_ytm_vs_maturity
+from ui.charts import plot_coupon_cashflow_by_month, plot_maturity_ladder, plot_ytm_vs_maturity
 
 # ─── Инициализация ───
 db.init_db()
@@ -1780,41 +1780,11 @@ with tab_calendar:
         if ladder["years"]:
             st.markdown("#### 💰 Лестница возврата номинала по годам")
             ladder_df = pd.DataFrame(ladder["years"])
-            ladder_df["year_str"] = ladder_df["year"].astype(str)
-
-            fig_yearly = go.Figure()
-            fig_yearly.add_trace(go.Bar(
-                x=ladder_df["year_str"],
-                y=ladder_df["maturity_return"],
-                name="Погашения",
-                marker_color="#a78bfa",
-            ))
-            fig_yearly.add_trace(go.Bar(
-                x=ladder_df["year_str"],
-                y=ladder_df["amortization_return"],
-                name="Амортизации",
-                marker_color="#22d3ee",
-            ))
-            fig_yearly.add_trace(go.Scatter(
-                x=ladder_df["year_str"],
-                y=ladder_df["total_return"],
-                name="Итого возврат",
-                mode="lines+markers+text",
-                line=dict(color="#f59e0b", width=2),
-                text=ladder_df["total_return"].apply(lambda v: f"{v:,.0f} ₽"),
-                textposition="top center",
-            ))
-            fig_yearly.update_layout(
-                barmode="stack",
-                xaxis_title="Год",
-                yaxis_title="₽",
-                height=340,
-                margin=dict(t=20, b=40),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                legend=dict(orientation="h", y=1.1),
-            )
-            st.plotly_chart(fig_yearly, use_container_width=True)
+            ladder_chart_result = plot_maturity_ladder(ladder_df)
+            fig_yearly = ladder_chart_result.get("figure")
+            ladder_df = ladder_chart_result.get("dataframe", ladder_df)
+            if fig_yearly is not None:
+                st.plotly_chart(fig_yearly, use_container_width=True)
 
             ladder_display = ladder_df[[
                 "year", "maturity_return", "amortization_return", "total_return",
