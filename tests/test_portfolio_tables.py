@@ -1,4 +1,5 @@
 import unittest
+from datetime import date
 
 import pandas as pd
 
@@ -43,6 +44,8 @@ class PortfolioTablesTests(unittest.TestCase):
             position_share_map={"ISIN1": 0.6, "ISIN2": 0.4},
             cost_map={"ISIN1": {"avg_price": 45.0}},
             sort_col="По имени",
+            maturity_by_isin={"ISIN1": "2027-04-27"},
+            as_of_date=date(2026, 4, 27),
         )
 
         display_df = prepare_positions_display_table(
@@ -54,16 +57,22 @@ class PortfolioTablesTests(unittest.TestCase):
         self.assertIn("Полная стоимость", display_df.columns)
         self.assertIn("P&L ₽", display_df.columns)
         self.assertIn("P&L %", display_df.columns)
+        self.assertIn("Дней до погашения", display_df.columns)
+        self.assertIn("Лет до погашения", display_df.columns)
 
         bond_row = display_df[display_df["Инструмент"] == "Bond A"].iloc[0]
         self.assertAlmostEqual(bond_row["Полная стоимость"], 110.0)
         self.assertAlmostEqual(bond_row["P&L ₽"], 20.0)
         self.assertAlmostEqual(bond_row["P&L %"], 22.2222222222, places=6)
+        self.assertEqual(bond_row["Дней до погашения"], 365)
+        self.assertEqual(bond_row["Лет до погашения"], "1.00")
 
         stock_row = display_df[display_df["Инструмент"] == "Stock B"].iloc[0]
         self.assertTrue(pd.isna(stock_row["Полная стоимость"]))
         self.assertTrue(pd.isna(stock_row["P&L ₽"]))
         self.assertTrue(pd.isna(stock_row["P&L %"]))
+        self.assertEqual(stock_row["Дней до погашения"], "нет данных")
+        self.assertEqual(stock_row["Лет до погашения"], "нет данных")
 
         self.assertNotIn("avg_price", pos_df.columns)
         self.assertTrue(pos_df.equals(original))

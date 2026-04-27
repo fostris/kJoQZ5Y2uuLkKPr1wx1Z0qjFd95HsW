@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Mapping, Iterable
 
 import pandas as pd
 
+from analytics.bonds import calculate_days_to_maturity, calculate_years_to_maturity
 from portfolio_metrics import add_pnl_columns, calculate_total_position_value
 
 
@@ -19,8 +21,13 @@ def prepare_positions_dataset(
     position_share_map: Mapping[str, float | None],
     cost_map: Mapping[str, Mapping],
     sort_col: str,
+    maturity_by_isin: Mapping[str, str | None] | None = None,
+    as_of_date: date | None = None,
 ) -> pd.DataFrame:
     """Фильтрация, обогащение и сортировка позиций для UI."""
+    maturity_by_isin = maturity_by_isin or {}
+    as_of_date = as_of_date or date.today()
+
     filtered = pos_df[pos_df["asset_type"].isin(list(type_filter))].copy()
 
     filtered["ytm"] = filtered["isin"].map(ytm_by_isin)
@@ -37,6 +44,16 @@ def prepare_positions_dataset(
 
     key_series = filtered["isin"].where(filtered["isin"].notna() & (filtered["isin"] != ""), filtered["name"])
     filtered["position_share"] = key_series.map(position_share_map)
+
+    filtered["days_to_maturity"] = filtered["isin"].map(
+        lambda isin: calculate_days_to_maturity(maturity_by_isin.get(isin), as_of_date)
+        if isinstance(isin, str) and isin else None
+    )
+    filtered["years_to_maturity"] = filtered["isin"].map(
+        lambda isin: calculate_years_to_maturity(maturity_by_isin.get(isin), as_of_date)
+        if isinstance(isin, str) and isin else None
+    )
+    filtered.loc[~bond_mask, ["days_to_maturity", "years_to_maturity"]] = None
 
     filtered = add_pnl_columns(filtered, cost_map)
 
@@ -69,6 +86,7 @@ def prepare_positions_display_table(
     """Подготовка итоговой таблицы позиций для st.dataframe."""
     display_df = filtered[[
         "name", "asset_type", "issuer", "qty", "avg_price", "price_end", "ytm",
+        "days_to_maturity", "years_to_maturity",
         "position_share", "issuer_share", "value_end", "nkd_end", "change_value", "pnl", "pnl_pct"
     ]].copy()
 
@@ -85,6 +103,8 @@ def prepare_positions_display_table(
         "avg_price": "Ср. цена",
         "price_end": "Цена",
         "ytm": "YTM",
+        "days_to_maturity": "Дней до погашения",
+        "years_to_maturity": "Лет до погашения",
         "position_share": "Доля портфеля %",
         "issuer_share": "Доля эмитента %",
         "value_end": "Стоимость",
@@ -95,6 +115,12 @@ def prepare_positions_display_table(
     })
 
     display_df["YTM"] = display_df["YTM"].map(format_ytm_fn)
+    display_df["Дней до погашения"] = display_df["Дней до погашения"].apply(
+        lambda v: int(v) if pd.notna(v) else "нет данных"
+    )
+    display_df["Лет до погашения"] = display_df["Лет до погашения"].apply(
+        lambda v: f"{v:.2f}" if pd.notna(v) else "нет данных"
+    )
     display_df["Доля портфеля %"] = display_df["Доля портфеля %"].apply(lambda v: v * 100 if v is not None else None)
     display_df["Доля эмитента %"] = display_df["Доля эмитента %"].apply(lambda v: v * 100 if v is not None else None)
     display_df["Эмитент"] = display_df["Эмитент"].fillna("—")

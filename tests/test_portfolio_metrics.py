@@ -5,6 +5,7 @@ import pandas as pd
 from portfolio_metrics import (
     add_pnl_columns,
     add_position_shares,
+    calculate_overview_returns,
     calculate_total_portfolio_value,
     calculate_total_position_value,
 )
@@ -112,6 +113,27 @@ class PortfolioSharesTests(unittest.TestCase):
         df = pd.DataFrame([{"total": 500.0}])
         out = add_position_shares(df, value_column="total")
         self.assertAlmostEqual(out.iloc[0]["position_share"], 1.0)
+
+
+class OverviewReturnsTests(unittest.TestCase):
+    def test_accepts_row_objects_without_get(self):
+        class RowLike:
+            def __init__(self, values):
+                self.values = values
+
+            def __getitem__(self, key):
+                return self.values[key]
+
+        history = [
+            {"period_end": "01.01.2026", "total_end": 1000.0},
+        ]
+        deposits = [RowLike({"amount": 400.0}), RowLike({"amount": 600.0})]
+
+        summary = calculate_overview_returns(history, deposits)
+
+        self.assertEqual(summary["latest_val"], None)
+        self.assertEqual(summary["total_deposited_all"], 1000.0)
+        self.assertEqual(summary["returns_data"], {})
 
 
 if __name__ == "__main__":

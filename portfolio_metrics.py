@@ -30,6 +30,26 @@ def _to_float(value) -> float | None:
     return converted
 
 
+def _row_get(row, key: str, default=None):
+    if row is None:
+        return default
+    if isinstance(row, Mapping):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (TypeError, KeyError, IndexError):
+        return default
+
+
+def _sum_deposits_amount(deposits_rows: Iterable[Mapping] | None) -> float:
+    total = 0.0
+    for row in (deposits_rows or []):
+        amount = _to_float(_row_get(row, "amount", 0))
+        if amount is not None:
+            total += amount
+    return float(total)
+
+
 def calculate_total_position_value(value_end, nkd_end) -> float | None:
     """Полная стоимость позиции: value_end + nkd_end."""
     value = _to_float(value_end)
@@ -122,7 +142,7 @@ def calculate_overview_returns(
         return {
             "returns_data": {},
             "latest_val": None,
-            "total_deposited_all": float(sum(d.get("amount", 0) for d in (deposits_rows or []))),
+            "total_deposited_all": _sum_deposits_amount(deposits_rows),
             "net_profit": None,
             "net_pct": None,
         }
@@ -153,7 +173,7 @@ def calculate_overview_returns(
             "days": days_total,
         }
 
-    total_deposited_all = float(sum(d.get("amount", 0) for d in (deposits_rows or [])))
+    total_deposited_all = _sum_deposits_amount(deposits_rows)
     if total_deposited_all > 0:
         net_profit = latest_val - total_deposited_all
         net_pct = net_profit / total_deposited_all * 100

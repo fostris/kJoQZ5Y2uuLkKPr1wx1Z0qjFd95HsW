@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 from datetime import datetime, date
 from pathlib import Path
 
+from analytics.bonds import calculate_weighted_ytm, calculate_weighted_years_to_maturity
 import concentration
 import db
 import moex_api
@@ -207,10 +208,28 @@ if not pos_df.empty:
     }))
 else:
     bond_isins = tuple()
+ytm_by_isin = load_bond_ytm_map(bond_isins) if bond_isins else {}
 issuer_by_isin = load_bond_issuer_map(bond_isins) if bond_isins else {}
+maturities = db.get_bond_maturities()
+maturity_by_isin = {
+    row["isin"]: row["maturity_date"]
+    for row in maturities
+    if row["isin"] in bond_isins
+}
 concentration_metrics = concentration.calculate_concentration_metrics(
     pos_list,
     issuer_by_isin=issuer_by_isin,
+)
+ytm_metrics = calculate_weighted_ytm(
+    positions=pos_list,
+    ytm_by_isin=ytm_by_isin,
+    bond_asset_types=BOND_ASSET_TYPES,
+)
+maturity_metrics = calculate_weighted_years_to_maturity(
+    positions=pos_list,
+    maturity_by_isin=maturity_by_isin,
+    as_of_date=date.today(),
+    bond_asset_types=BOND_ASSET_TYPES,
 )
 
 position_share_map = {}
@@ -265,6 +284,80 @@ with tab_overview:
     with c4:
         total_nkd = calculate_total_nkd(pos_df)
         st.metric("Накопленный НКД", f"{fmt(total_nkd)} ₽")
+
+    st.divider()
+    st.subheader("🏦 Доходность облигаций")
+
+    weighted_ytm = ytm_metrics.get("weighted_ytm")
+    ytm_coverage = ytm_metrics.get("coverage_pct")
+    total_bond_value = ytm_metrics.get("total_bond_value") or 0.0
+    covered_bond_value = ytm_metrics.get("covered_value") or 0.0
+    missing_ytm_count = int(ytm_metrics.get("missing_count") or 0)
+    missing_ytm_positions = ytm_metrics.get("missing_positions") or []
+    weighted_years_to_maturity = maturity_metrics.get("weighted_years_to_maturity")
+    maturity_coverage = maturity_metrics.get("coverage_pct")
+    missing_maturity_count = int(maturity_metrics.get("missing_count") or 0)
+
+    y1, y2, y3 = st.columns(3)
+    with y1:
+        st.metric(
+            "Средневзвешенная YTM",
+            f"{weighted_ytm:.2f}%" if weighted_ytm is not None else "нет данных",
+        )
+    with y2:
+        st.metric(
+            "Покрытие YTM",
+            f"{ytm_coverage * 100:.1f}%" if ytm_coverage is not None else "нет данных",
+        )
+    with y3:
+        st.metric(
+            "Ср. срок до погашения",
+            f"{weighted_years_to_maturity:.2f} лет" if weighted_years_to_maturity is not None else "нет данных",
+        )
+
+    if ytm_coverage is not None:
+        st.caption(
+            f"Покрытие по стоимости облигаций: {fmt(covered_bond_value)} ₽ из {fmt(total_bond_value)} ₽."
+        )
+        if ytm_coverage < 0.70:
+            st.warning(
+                f"Покрытие YTM ниже 70%: {ytm_coverage * 100:.1f}% облигационной части. "
+                f"Без YTM позиций: {missing_ytm_count}."
+            )
+        elif missing_ytm_count == 0 and total_bond_value > 0:
+            st.info("YTM есть по всем облигационным позициям.")
+    else:
+        st.caption("Для расчёта YTM: нет данных по облигациям.")
+
+    if missing_ytm_positions:
+        missing_df = pd.DataFrame(missing_ytm_positions).copy()
+        missing_df["portfolio_share"] = missing_df["portfolio_share"].apply(
+            lambda v: v * 100 if v is not None else None
+        )
+        missing_df = missing_df.rename(
+            columns={
+                "name": "Инструмент",
+                "isin": "ISIN",
+                "portfolio_share": "Доля портфеля %",
+                "market_value": "Полная стоимость",
+            }
+        )
+        st.dataframe(
+            missing_df[["Инструмент", "ISIN", "Доля портфеля %", "Полная стоимость"]],
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Доля портфеля %": st.column_config.NumberColumn(format="%.2f%%"),
+                "Полная стоимость": st.column_config.NumberColumn(format="%.2f ₽"),
+            },
+        )
+    if maturity_coverage is not None:
+        st.caption(
+            f"Покрытие срока погашения: {maturity_coverage * 100:.1f}% облигационной части; "
+            f"без даты погашения позиций: {missing_maturity_count}."
+        )
+    else:
+        st.caption("Для расчёта срока до погашения: нет данных.")
 
     st.divider()
 
@@ -564,7 +657,6 @@ with tab_positions:
     else:
         # Загрузка средних цен
         cost_map = db.get_cost_basis_map()
-        ytm_by_isin = load_bond_ytm_map(bond_isins) if bond_isins else {}
 
         # Фильтры
         col_filter, col_sort = st.columns(2)
@@ -591,6 +683,8 @@ with tab_positions:
             position_share_map=position_share_map,
             cost_map=cost_map,
             sort_col=sort_col,
+            maturity_by_isin=maturity_by_isin,
+            as_of_date=date.today(),
         )
 
         # Таблица позиций
@@ -604,6 +698,7 @@ with tab_positions:
         st.dataframe(
             display_df[[
                 "Инструмент", "Тип", "Эмитент", "Кол-во", "Ср. цена", "Цена", "YTM",
+                "Дней до погашения", "Лет до погашения",
                 "Доля портфеля %", "Доля эмитента %", "Полная стоимость", "Δ за день", "P&L ₽", "P&L %"
             ]],
             hide_index=True,
