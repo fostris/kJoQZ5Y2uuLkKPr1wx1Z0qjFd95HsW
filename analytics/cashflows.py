@@ -145,3 +145,91 @@ def build_coupon_cashflow_by_month(
         "end_date": window_end,
     }
 
+
+def build_maturity_ladder(
+    positions: Iterable[Mapping[str, Any]],
+    maturities: Iterable[Mapping[str, Any]],
+    amortizations: Iterable[Mapping[str, Any]],
+    as_of_date: date | None = None,
+) -> dict[str, Any]:
+    """Сгруппировать возврат номинала (погашения + амортизации) по годам."""
+    as_of = as_of_date or date.today()
+
+    qty_by_isin: dict[str, float] = {}
+    nominal_by_isin: dict[str, float] = {}
+    for position in positions:
+        isin = str(_row_get(position, "isin", "") or "")
+        if not isin:
+            continue
+        qty = _to_float(_row_get(position, "qty"))
+        nominal = _to_float(_row_get(position, "nominal"))
+        if qty is not None and qty > 0:
+            qty_by_isin[isin] = qty
+        if nominal is not None and nominal > 0:
+            nominal_by_isin[isin] = nominal
+
+    yearly: dict[int, dict[str, Any]] = {}
+
+    def _ensure_year(year: int) -> dict[str, Any]:
+        if year not in yearly:
+            yearly[year] = {
+                "year": year,
+                "maturity_return": 0.0,
+                "amortization_return": 0.0,
+                "total_return": 0.0,
+                "maturity_count": 0,
+                "amortization_count": 0,
+            }
+        return yearly[year]
+
+    for row in maturities:
+        maturity_date = _to_date(_row_get(row, "maturity_date"))
+        if maturity_date is None or maturity_date < as_of:
+            continue
+
+        isin = str(_row_get(row, "isin", "") or "")
+        maturity_value = _to_float(_row_get(row, "maturity_value"))
+        if maturity_value is None or maturity_value <= 0:
+            qty = _to_float(_row_get(row, "qty")) or qty_by_isin.get(isin)
+            nominal = _to_float(_row_get(row, "nominal")) or nominal_by_isin.get(isin) or 1000.0
+            if qty is None or qty <= 0:
+                continue
+            maturity_value = qty * nominal
+
+        bucket = _ensure_year(maturity_date.year)
+        bucket["maturity_return"] += maturity_value
+        bucket["maturity_count"] += 1
+
+    for row in amortizations:
+        amort_date = _to_date(_row_get(row, "amort_date"))
+        if amort_date is None or amort_date < as_of:
+            continue
+
+        isin = str(_row_get(row, "isin", "") or "")
+        amort_value = _to_float(_row_get(row, "amort_value"))
+        if amort_value is None or amort_value <= 0:
+            value_prc = _to_float(_row_get(row, "value_prc"))
+            qty = _to_float(_row_get(row, "qty")) or qty_by_isin.get(isin)
+            nominal = nominal_by_isin.get(isin) or 1000.0
+            if value_prc is None or qty is None or qty <= 0:
+                continue
+            amort_value = value_prc / 100.0 * nominal * qty
+
+        bucket = _ensure_year(amort_date.year)
+        bucket["amortization_return"] += amort_value
+        bucket["amortization_count"] += 1
+
+    rows: list[dict[str, Any]] = []
+    for year in sorted(yearly.keys()):
+        row = yearly[year]
+        row["maturity_return"] = float(row["maturity_return"])
+        row["amortization_return"] = float(row["amortization_return"])
+        row["total_return"] = float(row["maturity_return"] + row["amortization_return"])
+        rows.append(row)
+
+    return {
+        "years": rows,
+        "total_maturity_return": float(sum(r["maturity_return"] for r in rows)),
+        "total_amortization_return": float(sum(r["amortization_return"] for r in rows)),
+        "total_return": float(sum(r["total_return"] for r in rows)),
+    }

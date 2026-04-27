@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from analytics.cashflows import build_coupon_cashflow_by_month
+from analytics.cashflows import build_coupon_cashflow_by_month, build_maturity_ladder
 
 
 class CouponCashflowByMonthTests(unittest.TestCase):
@@ -80,6 +80,60 @@ class CouponCashflowByMonthTests(unittest.TestCase):
         self.assertEqual(len(result["months"]), 12)
 
 
+class MaturityLadderTests(unittest.TestCase):
+    def test_regular_maturity(self):
+        positions = [{"isin": "ISIN1", "qty": 10, "nominal": 1000}]
+        maturities = [
+            {
+                "isin": "ISIN1",
+                "maturity_date": "2027-06-01",
+                "maturity_value": 10000.0,
+                "qty": 10,
+                "nominal": 1000,
+            }
+        ]
+
+        result = build_maturity_ladder(
+            positions=positions,
+            maturities=maturities,
+            amortizations=[],
+            as_of_date=date(2026, 1, 1),
+        )
+
+        self.assertEqual(len(result["years"]), 1)
+        row = result["years"][0]
+        self.assertEqual(row["year"], 2027)
+        self.assertAlmostEqual(row["maturity_return"], 10000.0)
+        self.assertAlmostEqual(row["amortization_return"], 0.0)
+        self.assertAlmostEqual(row["total_return"], 10000.0)
+        self.assertEqual(row["maturity_count"], 1)
+        self.assertEqual(row["amortization_count"], 0)
+
+    def test_amortizing_bond(self):
+        positions = [{"isin": "ISIN1", "qty": 10, "nominal": 1000}]
+        maturities = [
+            {"isin": "ISIN1", "maturity_date": "2028-01-10", "maturity_value": 6000.0},
+        ]
+        amortizations = [
+            {"isin": "ISIN1", "amort_date": "2026-07-15", "amort_value": 2000.0},
+            {"isin": "ISIN1", "amort_date": "2027-07-15", "amort_value": 2000.0},
+        ]
+
+        result = build_maturity_ladder(
+            positions=positions,
+            maturities=maturities,
+            amortizations=amortizations,
+            as_of_date=date(2026, 1, 1),
+        )
+
+        self.assertEqual([row["year"] for row in result["years"]], [2026, 2027, 2028])
+        self.assertAlmostEqual(result["years"][0]["amortization_return"], 2000.0)
+        self.assertAlmostEqual(result["years"][1]["amortization_return"], 2000.0)
+        self.assertAlmostEqual(result["years"][2]["maturity_return"], 6000.0)
+        self.assertAlmostEqual(result["total_amortization_return"], 4000.0)
+        self.assertAlmostEqual(result["total_maturity_return"], 6000.0)
+        self.assertAlmostEqual(result["total_return"], 10000.0)
+
+
 if __name__ == "__main__":
     unittest.main()
-

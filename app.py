@@ -11,7 +11,7 @@ from datetime import datetime, date
 from pathlib import Path
 
 from analytics.bonds import calculate_weighted_ytm, calculate_weighted_years_to_maturity
-from analytics.cashflows import build_coupon_cashflow_by_month
+from analytics.cashflows import build_coupon_cashflow_by_month, build_maturity_ladder
 import concentration
 import db
 import moex_api
@@ -1366,32 +1366,80 @@ with tab_calendar:
                              "Ставка %": st.column_config.NumberColumn(format="%.2f%%"),
                          })
 
-        # Денежный поток от погашений по годам
-        mat_df["year"] = mat_df["maturity_date"].dt.year
-        yearly_mat = mat_df.groupby("year").agg(
-            value=("maturity_value", "sum"),
-            count=("name", "count"),
-        ).reset_index()
+        # Лестница возврата номинала по годам
+        maturity_rows = [dict(m) for m in maturities]
+        amortization_rows = [dict(a) for a in amortizations] if amortizations else []
+        ladder = build_maturity_ladder(
+            positions=pos_list,
+            maturities=maturity_rows,
+            amortizations=amortization_rows,
+            as_of_date=today_mat.date(),
+        )
 
-        if len(yearly_mat) > 1:
-            st.markdown("#### 💰 Погашения по годам")
+        if ladder["years"]:
+            st.markdown("#### 💰 Лестница возврата номинала по годам")
+            ladder_df = pd.DataFrame(ladder["years"])
+            ladder_df["year_str"] = ladder_df["year"].astype(str)
+
             fig_yearly = go.Figure()
             fig_yearly.add_trace(go.Bar(
-                x=yearly_mat["year"].astype(str),
-                y=yearly_mat["value"],
-                text=yearly_mat.apply(lambda r: f"{r['value']:,.0f} ₽\n({r['count']} обл.)", axis=1),
-                textposition="outside",
+                x=ladder_df["year_str"],
+                y=ladder_df["maturity_return"],
+                name="Погашения",
                 marker_color="#a78bfa",
             ))
+            fig_yearly.add_trace(go.Bar(
+                x=ladder_df["year_str"],
+                y=ladder_df["amortization_return"],
+                name="Амортизации",
+                marker_color="#22d3ee",
+            ))
+            fig_yearly.add_trace(go.Scatter(
+                x=ladder_df["year_str"],
+                y=ladder_df["total_return"],
+                name="Итого возврат",
+                mode="lines+markers+text",
+                line=dict(color="#f59e0b", width=2),
+                text=ladder_df["total_return"].apply(lambda v: f"{v:,.0f} ₽"),
+                textposition="top center",
+            ))
             fig_yearly.update_layout(
+                barmode="stack",
                 xaxis_title="Год",
                 yaxis_title="₽",
-                height=300,
+                height=340,
                 margin=dict(t=20, b=40),
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
+                legend=dict(orientation="h", y=1.1),
             )
             st.plotly_chart(fig_yearly, use_container_width=True)
+
+            ladder_display = ladder_df[[
+                "year", "maturity_return", "amortization_return", "total_return",
+                "maturity_count", "amortization_count"
+            ]].rename(
+                columns={
+                    "year": "Год",
+                    "maturity_return": "Погашения ₽",
+                    "amortization_return": "Амортизации ₽",
+                    "total_return": "Итого возврат ₽",
+                    "maturity_count": "Погашений",
+                    "amortization_count": "Амортизаций",
+                }
+            )
+            st.dataframe(
+                ladder_display,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Погашения ₽": st.column_config.NumberColumn(format="%.2f ₽"),
+                    "Амортизации ₽": st.column_config.NumberColumn(format="%.2f ₽"),
+                    "Итого возврат ₽": st.column_config.NumberColumn(format="%.2f ₽"),
+                    "Погашений": st.column_config.NumberColumn(format="%d"),
+                    "Амортизаций": st.column_config.NumberColumn(format="%d"),
+                },
+            )
 
         # Амортизации
         if amortizations:
