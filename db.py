@@ -47,6 +47,25 @@ SCHEMA_MIGRATIONS: list[tuple[int, str, str]] = [
             ON issuer_reference(issuer_name);
         """,
     ),
+    (
+        4,
+        "add_bond_ratings",
+        """
+        CREATE TABLE IF NOT EXISTS bond_ratings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            isin TEXT NOT NULL UNIQUE,
+            issuer TEXT DEFAULT '',
+            rating TEXT NOT NULL,
+            rating_agency TEXT DEFAULT '',
+            rating_date TEXT DEFAULT '',
+            source_url TEXT DEFAULT '',
+            comment TEXT DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_bond_ratings_isin
+            ON bond_ratings(isin);
+        """,
+    ),
 ]
 
 
@@ -698,6 +717,73 @@ def delete_issuer_reference(issuer_name: str) -> None:
             "DELETE FROM issuer_reference WHERE issuer_name = ?",
             (normalized_name,),
         )
+
+
+# ─── Bond Ratings ───
+
+def get_bond_ratings():
+    """Все записи ручного справочника рейтингов облигаций."""
+    with get_db() as conn:
+        return conn.execute(
+            "SELECT * FROM bond_ratings ORDER BY isin COLLATE NOCASE"
+        ).fetchall()
+
+
+def get_bond_ratings_map() -> dict[str, dict]:
+    """Словарь ISIN -> запись рейтинга."""
+    rows = get_bond_ratings()
+    return {str(row["isin"]): dict(row) for row in rows if row["isin"]}
+
+
+def upsert_bond_rating(
+    isin: str,
+    issuer: str = "",
+    rating: str = "",
+    rating_agency: str = "",
+    rating_date: str = "",
+    source_url: str = "",
+    comment: str = "",
+) -> None:
+    """Добавить/обновить ручной рейтинг облигации по ISIN."""
+    normalized_isin = (isin or "").strip().upper()
+    normalized_rating = (rating or "").strip()
+    if not normalized_isin:
+        raise ValueError("isin is required")
+    if not normalized_rating:
+        raise ValueError("rating is required")
+
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO bond_ratings
+               (isin, issuer, rating, rating_agency, rating_date, source_url, comment, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(isin) DO UPDATE SET
+                 issuer=excluded.issuer,
+                 rating=excluded.rating,
+                 rating_agency=excluded.rating_agency,
+                 rating_date=excluded.rating_date,
+                 source_url=excluded.source_url,
+                 comment=excluded.comment,
+                 updated_at=datetime('now')""",
+            (
+                normalized_isin,
+                (issuer or "").strip(),
+                normalized_rating,
+                (rating_agency or "").strip(),
+                (rating_date or "").strip(),
+                (source_url or "").strip(),
+                (comment or "").strip(),
+            ),
+        )
+
+
+def delete_bond_rating(isin: str) -> None:
+    """Удалить запись рейтинга облигации по ISIN."""
+    normalized_isin = (isin or "").strip().upper()
+    if not normalized_isin:
+        return
+    with get_db() as conn:
+        conn.execute("DELETE FROM bond_ratings WHERE isin = ?", (normalized_isin,))
 
 
 # ─── Rebalance Targets ───

@@ -13,6 +13,11 @@ from pathlib import Path
 from analytics.bonds import calculate_weighted_ytm, calculate_weighted_years_to_maturity
 from analytics.cashflows import build_coupon_cashflow_by_month, build_maturity_ladder
 from analytics.data_quality import build_attention_list, build_bond_data_quality_report
+from analytics.ratings import (
+    RATING_BUCKETS,
+    RATING_BUCKET_UNRATED,
+    build_rating_distribution,
+)
 import concentration
 import db
 import moex_api
@@ -260,6 +265,11 @@ else:
 ytm_by_isin = load_bond_ytm_map(bond_isins) if bond_isins else {}
 issuer_by_isin = load_bond_issuer_map(bond_isins) if bond_isins else {}
 issuer_reference_map = db.get_issuer_reference_map()
+bond_ratings_map = db.get_bond_ratings_map()
+rating_by_isin = {
+    str(isin): (row.get("rating") if isinstance(row, dict) else None)
+    for isin, row in bond_ratings_map.items()
+}
 maturities = db.get_bond_maturities()
 coupon_calendar = db.get_coupon_calendar()
 bond_amortizations = db.get_bond_amortizations()
@@ -306,6 +316,11 @@ maturity_ladder_report = build_maturity_ladder(
     maturities=[dict(row) for row in maturities],
     amortizations=[dict(row) for row in bond_amortizations],
     as_of_date=date.today(),
+)
+rating_distribution = build_rating_distribution(
+    positions=pos_list,
+    rating_by_isin=rating_by_isin,
+    bond_asset_types=BOND_ASSET_TYPES,
 )
 
 position_share_map = {}
@@ -451,6 +466,74 @@ with tab_overview:
         )
     else:
         st.caption("Для расчёта срока до погашения: нет данных.")
+
+    st.divider()
+    st.subheader("⭐ Рейтинги облигаций")
+
+    rating_rows = rating_distribution.get("rows", [])
+    rated_total = float(rating_distribution.get("total_bond_value") or 0.0)
+    unrated_share = rating_distribution.get("unrated_share")
+
+    if rated_total <= 0:
+        st.info("Нет облигационных позиций для агрегата рейтингов.")
+    else:
+        rating_share_map = rating_distribution.get("share_map", {})
+        bucket_cols = st.columns(len(RATING_BUCKETS))
+        for idx, bucket in enumerate(RATING_BUCKETS):
+            bucket_share = rating_share_map.get(bucket)
+            with bucket_cols[idx]:
+                st.metric(
+                    bucket,
+                    f"{bucket_share * 100:.1f}%" if bucket_share is not None else "0.0%",
+                )
+
+        rating_df = pd.DataFrame(rating_rows).rename(
+            columns={
+                "bucket": "Рейтинг",
+                "market_value": "Рыночная стоимость",
+                "share": "Доля облигационной части",
+                "bonds_count": "Бумаг",
+            }
+        )
+        rating_df["Доля облигационной части"] = rating_df["Доля облигационной части"].apply(
+            lambda value: value * 100 if value is not None else None
+        )
+        st.dataframe(
+            rating_df[["Рейтинг", "Рыночная стоимость", "Доля облигационной части", "Бумаг"]],
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Рыночная стоимость": st.column_config.NumberColumn(format="%.2f ₽"),
+                "Доля облигационной части": st.column_config.NumberColumn(format="%.2f%%"),
+                "Бумаг": st.column_config.NumberColumn(format="%d"),
+            },
+        )
+
+        rating_chart_df = rating_df.copy()
+        rating_fig = px.bar(
+            rating_chart_df,
+            x="Рейтинг",
+            y="Доля облигационной части",
+            text="Доля облигационной части",
+            color="Рейтинг",
+            labels={"Доля облигационной части": "Доля облигационной части, %"},
+        )
+        rating_fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+        rating_fig.update_layout(
+            showlegend=False,
+            margin=dict(l=8, r=8, t=24, b=8),
+            xaxis_title=None,
+            yaxis_title="Доля облигационной части, %",
+            yaxis=dict(rangemode="tozero"),
+        )
+        st.plotly_chart(rating_fig, use_container_width=True)
+
+        if unrated_share is not None and unrated_share > 0:
+            st.warning(
+                f"Доля корзины «{RATING_BUCKET_UNRATED}»: {unrated_share * 100:.1f}% облигационной части."
+            )
+        else:
+            st.info("Все облигационные позиции имеют заполненный рейтинг.")
 
     st.divider()
     st.subheader("🧪 Качество данных облигаций")
@@ -932,6 +1015,124 @@ with tab_overview:
                 st.success(f"✅ Запись «{delete_target}» удалена.")
                 st.rerun()
 
+    st.markdown("#### 🏷 Ручные рейтинги облигаций")
+    bond_rating_rows = db.get_bond_ratings()
+    if bond_rating_rows:
+        ratings_df = pd.DataFrame([dict(row) for row in bond_rating_rows]).rename(
+            columns={
+                "isin": "ISIN",
+                "issuer": "Эмитент",
+                "rating": "Рейтинг",
+                "rating_agency": "Агентство",
+                "rating_date": "Дата рейтинга",
+                "source_url": "Источник",
+                "comment": "Комментарий",
+                "updated_at": "Обновлено",
+            }
+        )
+        st.dataframe(
+            ratings_df[[
+                "ISIN",
+                "Эмитент",
+                "Рейтинг",
+                "Агентство",
+                "Дата рейтинга",
+                "Источник",
+                "Комментарий",
+                "Обновлено",
+            ]],
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("Ручные рейтинги пока не заполнены.")
+
+    with st.expander("➕ Добавить / обновить рейтинг облигации"):
+        existing_isins = sorted({
+            str(row["isin"])
+            for row in bond_rating_rows
+            if row["isin"]
+        })
+        suggested_isins = sorted({
+            str(row.get("isin"))
+            for row in pos_list
+            if row.get("asset_type") in BOND_ASSET_TYPES and row.get("isin")
+        })
+        selected_isin = st.selectbox(
+            "Выбрать существующий ISIN",
+            options=[""] + existing_isins,
+            format_func=lambda value: "— новая запись —" if not value else value,
+        )
+
+        selected_rating = bond_ratings_map.get(selected_isin) if selected_isin else None
+        rating_isin_input = st.text_input(
+            "rating_isin",
+            value=selected_isin or "",
+            placeholder="RU000A10C5L7",
+        )
+        rating_issuer_input = st.text_input(
+            "rating_issuer",
+            value=(selected_rating or {}).get("issuer") or "",
+            placeholder="Название эмитента",
+        )
+        rating_value_input = st.text_input(
+            "rating",
+            value=(selected_rating or {}).get("rating") or "",
+            placeholder="Например: AA(RU) / A+ / BBB",
+        )
+        rating_agency_input = st.text_input(
+            "rating_agency",
+            value=(selected_rating or {}).get("rating_agency") or "",
+            placeholder="Например: АКРА / Эксперт РА",
+        )
+        rating_date_input = st.text_input(
+            "rating_date",
+            value=(selected_rating or {}).get("rating_date") or "",
+            placeholder="YYYY-MM-DD",
+        )
+        rating_source_input = st.text_input(
+            "source_url",
+            value=(selected_rating or {}).get("source_url") or "",
+            placeholder="https://...",
+        )
+        rating_comment_input = st.text_area(
+            "rating_comment",
+            value=(selected_rating or {}).get("comment") or "",
+            placeholder="Комментарий к источнику или статусу рейтинга",
+        )
+
+        if suggested_isins:
+            st.caption("Подсказки ISIN из портфеля: " + ", ".join(suggested_isins[:15]))
+
+        if st.button("💾 Сохранить рейтинг"):
+            if not rating_isin_input.strip():
+                st.warning("Укажите ISIN.")
+            elif not rating_value_input.strip():
+                st.warning("Укажите рейтинг.")
+            else:
+                db.upsert_bond_rating(
+                    isin=rating_isin_input,
+                    issuer=rating_issuer_input,
+                    rating=rating_value_input,
+                    rating_agency=rating_agency_input,
+                    rating_date=rating_date_input,
+                    source_url=rating_source_input,
+                    comment=rating_comment_input,
+                )
+                st.success(f"✅ Рейтинг сохранён для «{rating_isin_input.strip().upper()}».")
+                st.rerun()
+
+    if bond_rating_rows:
+        with st.expander("🗑 Удалить рейтинг"):
+            delete_rating_isin = st.selectbox(
+                "ISIN для удаления",
+                options=sorted({str(row["isin"]) for row in bond_rating_rows if row["isin"]}),
+            )
+            if st.button("Удалить рейтинг"):
+                db.delete_bond_rating(delete_rating_isin)
+                st.success(f"✅ Рейтинг для «{delete_rating_isin}» удалён.")
+                st.rerun()
+
     st.divider()
     st.subheader("📄 Экспорт краткого HTML-отчёта")
 
@@ -1245,6 +1446,7 @@ with tab_positions:
             position_share_map=position_share_map,
             cost_map=cost_map,
             sort_col=sort_col,
+            rating_by_isin=rating_by_isin,
             maturity_by_isin=maturity_by_isin,
             as_of_date=date.today(),
         )

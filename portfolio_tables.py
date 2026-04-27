@@ -28,6 +28,7 @@ POSITIONS_TABLE_COLUMNS_BY_MODE = {
     "Все колонки": [
         "Инструмент",
         "Тип",
+        "Рейтинг",
         "Эмитент",
         "Кол-во",
         "Ср. цена",
@@ -48,6 +49,7 @@ POSITIONS_TABLE_COLUMNS_BY_MODE = {
     "Обзор": [
         "Инструмент",
         "Тип",
+        "Рейтинг",
         "Эмитент",
         "Доля портфеля %",
         "Доля эмитента %",
@@ -67,6 +69,7 @@ POSITIONS_TABLE_COLUMNS_BY_MODE = {
     "Риск": [
         "Инструмент",
         "Тип",
+        "Рейтинг",
         "Эмитент",
         "Доля портфеля %",
         "Доля эмитента %",
@@ -98,6 +101,7 @@ POSITIONS_TABLE_COLUMNS_BY_MODE = {
     "Качество данных": [
         "Инструмент",
         "Тип",
+        "Рейтинг",
         "Эмитент",
         "YTM",
         "Ср. цена",
@@ -258,11 +262,13 @@ def prepare_positions_dataset(
     position_share_map: Mapping[str, float | None],
     cost_map: Mapping[str, Mapping],
     sort_col: str,
+    rating_by_isin: Mapping[str, str | None] | None = None,
     maturity_by_isin: Mapping[str, str | None] | None = None,
     as_of_date: date | None = None,
 ) -> pd.DataFrame:
     """Фильтрация, обогащение и сортировка позиций для UI."""
     maturity_by_isin = maturity_by_isin or {}
+    rating_by_isin = rating_by_isin or {}
     as_of_date = as_of_date or date.today()
 
     filtered = pos_df[pos_df["asset_type"].isin(list(type_filter))].copy()
@@ -278,6 +284,9 @@ def prepare_positions_dataset(
 
     filtered["issuer_share"] = filtered["issuer"].map(issuer_share_map)
     filtered.loc[~bond_mask, "issuer_share"] = None
+
+    filtered["rating"] = filtered["isin"].map(rating_by_isin).astype("object")
+    filtered.loc[~bond_mask, "rating"] = "—"
 
     key_series = filtered["isin"].where(filtered["isin"].notna() & (filtered["isin"] != ""), filtered["name"])
     filtered["position_share"] = key_series.map(position_share_map)
@@ -339,7 +348,7 @@ def prepare_positions_display_table(
 ) -> pd.DataFrame:
     """Подготовка итоговой таблицы позиций для st.dataframe."""
     display_df = filtered[[
-        "name", "asset_type", "issuer", "qty", "avg_price", "price_end", "ytm",
+        "name", "asset_type", "rating", "issuer", "qty", "avg_price", "price_end", "ytm",
         "days_to_maturity", "years_to_maturity",
         "price_to_nominal_pct", "premium_discount_status",
         "position_share", "issuer_share", "flags",
@@ -354,6 +363,7 @@ def prepare_positions_display_table(
 
     display_df = display_df.rename(columns={
         "name": "Инструмент",
+        "rating": "Рейтинг",
         "issuer": "Эмитент",
         "qty": "Кол-во",
         "avg_price": "Ср. цена",
@@ -386,6 +396,9 @@ def prepare_positions_display_table(
     display_df["Статус к номиналу"] = display_df["Статус к номиналу"].fillna("нет данных")
     display_df["Доля портфеля %"] = display_df["Доля портфеля %"].apply(lambda v: v * 100 if v is not None else None)
     display_df["Доля эмитента %"] = display_df["Доля эмитента %"].apply(lambda v: v * 100 if v is not None else None)
+    display_df["Рейтинг"] = display_df["Рейтинг"].apply(
+        lambda v: None if v is None or str(v).strip() == "" else v
+    ).fillna("без рейтинга")
     display_df["Эмитент"] = display_df["Эмитент"].fillna("—")
     display_df["flags"] = display_df["flags"].fillna("")
     return display_df
@@ -397,7 +410,7 @@ def prepare_positions_export_table(
 ) -> pd.DataFrame:
     """Подготовить CSV-таблицу позиций для экспорта текущей выборки."""
     export_df = filtered[[
-        "name", "isin", "asset_type", "issuer", "ytm",
+        "name", "isin", "asset_type", "rating", "issuer", "ytm",
         "position_share", "issuer_share", "years_to_maturity",
         "premium_discount_status", "flags", "pnl", "pnl_pct", "value_end", "nkd_end",
     ]].copy()
@@ -419,6 +432,7 @@ def prepare_positions_export_table(
             "name": "Инструмент",
             "isin": "ISIN",
             "type_label": "Тип",
+            "rating": "Рейтинг",
             "issuer": "Эмитент",
             "ytm": "YTM %",
             "position_share_pct": "Доля позиции %",
@@ -432,6 +446,9 @@ def prepare_positions_export_table(
         }
     )
 
+    export_df["Рейтинг"] = export_df["Рейтинг"].apply(
+        lambda v: None if v is None or str(v).strip() == "" else v
+    ).fillna("без рейтинга")
     export_df["Эмитент"] = export_df["Эмитент"].fillna("—")
     export_df["flags"] = export_df["flags"].fillna("")
     export_df["Статус к номиналу"] = export_df["Статус к номиналу"].fillna("нет данных")
@@ -440,6 +457,7 @@ def prepare_positions_export_table(
         "Инструмент",
         "ISIN",
         "Тип",
+        "Рейтинг",
         "Эмитент",
         "YTM %",
         "Доля позиции %",

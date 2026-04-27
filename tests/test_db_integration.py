@@ -99,6 +99,7 @@ class DbIntegrationTests(unittest.TestCase):
             "positions",
             "coupon_calendar",
             "bond_maturities",
+            "bond_ratings",
             "cost_basis",
             "issuer_reference",
             "schema_migrations",
@@ -230,6 +231,35 @@ class DbIntegrationTests(unittest.TestCase):
 
         db.delete_issuer_reference("Issuer A")
         self.assertNotIn("Issuer A", db.get_issuer_reference_map())
+
+    def test_bond_ratings_crud(self):
+        db.upsert_bond_rating(
+            isin="ru000test99",
+            issuer="Issuer A",
+            rating="AA(RU)",
+            rating_agency="АКРА",
+            rating_date="2026-04-01",
+            source_url="https://example.test/rating-a",
+            comment="Initial",
+        )
+        db.upsert_bond_rating(
+            isin="RU000TEST99",
+            issuer="Issuer A",
+            rating="A+(RU)",
+            rating_agency="Эксперт РА",
+            rating_date="2026-04-05",
+            source_url="https://example.test/rating-b",
+            comment="Updated",
+        )
+
+        ratings_map = db.get_bond_ratings_map()
+        self.assertIn("RU000TEST99", ratings_map)
+        self.assertEqual(ratings_map["RU000TEST99"]["rating"], "A+(RU)")
+        self.assertEqual(ratings_map["RU000TEST99"]["rating_agency"], "Эксперт РА")
+        self.assertEqual(ratings_map["RU000TEST99"]["source_url"], "https://example.test/rating-b")
+
+        db.delete_bond_rating("ru000test99")
+        self.assertNotIn("RU000TEST99", db.get_bond_ratings_map())
 
 
 if __name__ == "__main__":

@@ -27,12 +27,16 @@ class DbMigrationsTests(unittest.TestCase):
             data_sync_exists = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='data_sync_status'"
             ).fetchone()
+            bond_ratings_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bond_ratings'"
+            ).fetchone()
             reports_exists = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reports'"
             ).fetchone()
 
         self.assertEqual(migrations_count, len(db.SCHEMA_MIGRATIONS))
         self.assertIsNotNone(data_sync_exists)
+        self.assertIsNotNone(bond_ratings_exists)
         self.assertIsNotNone(reports_exists)
 
     def test_apply_migrations_is_idempotent(self):

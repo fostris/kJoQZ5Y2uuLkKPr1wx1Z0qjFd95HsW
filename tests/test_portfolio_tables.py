@@ -71,6 +71,7 @@ class PortfolioTablesTests(unittest.TestCase):
         self.assertIn("Лет до погашения", display_df.columns)
         self.assertIn("Цена к номиналу %", display_df.columns)
         self.assertIn("Статус к номиналу", display_df.columns)
+        self.assertIn("Рейтинг", display_df.columns)
         self.assertIn("flags", display_df.columns)
 
         bond_row = display_df[display_df["Инструмент"] == "Bond A"].iloc[0]
@@ -81,6 +82,7 @@ class PortfolioTablesTests(unittest.TestCase):
         self.assertEqual(bond_row["Лет до погашения"], "1.00")
         self.assertEqual(bond_row["Цена к номиналу %"], "50.00")
         self.assertEqual(bond_row["Статус к номиналу"], "discount")
+        self.assertEqual(bond_row["Рейтинг"], "без рейтинга")
         self.assertIn(">10% позиции", bond_row["flags"])
         self.assertIn(">10% эмитент", bond_row["flags"])
         self.assertIn("discount", bond_row["flags"])
@@ -93,6 +95,7 @@ class PortfolioTablesTests(unittest.TestCase):
         self.assertEqual(stock_row["Лет до погашения"], "нет данных")
         self.assertEqual(stock_row["Цена к номиналу %"], "нет данных")
         self.assertEqual(stock_row["Статус к номиналу"], "нет данных")
+        self.assertEqual(stock_row["Рейтинг"], "—")
         self.assertIn(">10% позиции", stock_row["flags"])
         self.assertIn("нет cost basis", stock_row["flags"])
 
@@ -248,6 +251,7 @@ class PortfolioTablesTests(unittest.TestCase):
                     "name": "Bond A",
                     "isin": "ISIN1",
                     "asset_type": "bond_corp",
+                    "rating": "AA(RU)",
                     "issuer": "Issuer A",
                     "ytm": 11.5,
                     "position_share": 0.12,
@@ -274,6 +278,7 @@ class PortfolioTablesTests(unittest.TestCase):
                 "Инструмент",
                 "ISIN",
                 "Тип",
+                "Рейтинг",
                 "Эмитент",
                 "YTM %",
                 "Доля позиции %",
@@ -289,6 +294,7 @@ class PortfolioTablesTests(unittest.TestCase):
         self.assertAlmostEqual(export_df.iloc[0]["Доля позиции %"], 12.0)
         self.assertAlmostEqual(export_df.iloc[0]["Доля эмитента %"], 18.0)
         self.assertAlmostEqual(export_df.iloc[0]["Полная стоимость ₽"], 2050.0)
+        self.assertEqual(export_df.iloc[0]["Рейтинг"], "AA(RU)")
 
 
 if __name__ == "__main__":
