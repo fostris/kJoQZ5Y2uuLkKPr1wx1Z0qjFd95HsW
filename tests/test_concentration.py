@@ -1,0 +1,104 @@
+import unittest
+
+import concentration
+
+
+class ConcentrationMetricsTests(unittest.TestCase):
+    def test_calculate_position_shares(self):
+        positions = [
+            {"name": "A", "asset_type": "stock", "value_end": 100.0, "nkd_end": 0.0},
+            {"name": "B", "asset_type": "stock", "value_end": 300.0, "nkd_end": 0.0},
+        ]
+
+        rows, total = concentration.calculate_position_shares(positions)
+
+        self.assertEqual(total, 400.0)
+        self.assertAlmostEqual(rows[0]["position_share"], 0.25)
+        self.assertAlmostEqual(rows[1]["position_share"], 0.75)
+
+    def test_grouping_by_issuer(self):
+        positions = [
+            {"name": "Bond 1", "isin": "ISIN1", "asset_type": "bond_corp", "value_end": 100.0, "nkd_end": 0.0},
+            {"name": "Bond 2", "isin": "ISIN2", "asset_type": "bond_corp", "value_end": 200.0, "nkd_end": 0.0},
+            {"name": "Bond 3", "isin": "ISIN3", "asset_type": "bond_corp", "value_end": 300.0, "nkd_end": 0.0},
+        ]
+
+        rows, total = concentration.calculate_position_shares(positions)
+        issuers, fallback_count = concentration.group_bond_positions_by_issuer(
+            rows,
+            total,
+            issuer_by_isin={
+                "ISIN1": "Issuer A",
+                "ISIN2": "Issuer A",
+                "ISIN3": "Issuer B",
+            },
+        )
+
+        self.assertEqual(fallback_count, 0)
+        self.assertEqual(len(issuers), 2)
+        self.assertEqual(issuers[0]["issuer"], "Issuer A")
+        self.assertAlmostEqual(issuers[0]["market_value"], 300.0)
+        self.assertAlmostEqual(issuers[0]["issuer_share"], 0.5)
+        self.assertEqual(issuers[0]["issues_count"], 2)
+
+    def test_hhi_calculation(self):
+        hhi = concentration.compute_hhi([0.2, 0.2, 0.2, 0.2, 0.2])
+        self.assertAlmostEqual(hhi, 0.2)
+
+    def test_warning_for_position_share_over_limit(self):
+        positions = [
+            {"name": "Big", "isin": "I1", "asset_type": "stock", "value_end": 150.0, "nkd_end": 0.0},
+            {"name": "Small", "isin": "I2", "asset_type": "stock", "value_end": 50.0, "nkd_end": 0.0},
+        ]
+
+        metrics = concentration.calculate_concentration_metrics(positions)
+
+        self.assertTrue(any("Позиция 'Big'" in msg for msg in metrics["warnings"]))
+
+    def test_warning_for_issuer_share_over_limit(self):
+        positions = [
+            {"name": "Bond A", "isin": "ISIN1", "asset_type": "bond_corp", "value_end": 120.0, "nkd_end": 0.0},
+            {"name": "Bond B", "isin": "ISIN2", "asset_type": "bond_corp", "value_end": 80.0, "nkd_end": 0.0},
+        ]
+
+        metrics = concentration.calculate_concentration_metrics(
+            positions,
+            issuer_by_isin={"ISIN1": "Issuer X", "ISIN2": "Issuer X"},
+        )
+
+        self.assertTrue(any("Эмитент 'Issuer X'" in msg for msg in metrics["warnings"]))
+
+    def test_warning_for_corporate_bonds_share_over_limit(self):
+        positions = [
+            {"name": "Corp1", "isin": "C1", "asset_type": "bond_corp", "value_end": 80.0, "nkd_end": 0.0},
+            {"name": "Corp2", "isin": "C2", "asset_type": "bond_corp", "value_end": 10.0, "nkd_end": 0.0},
+            {"name": "Stock", "isin": "S1", "asset_type": "stock", "value_end": 10.0, "nkd_end": 0.0},
+        ]
+
+        metrics = concentration.calculate_concentration_metrics(positions)
+
+        self.assertTrue(any("Доля корпоративных облигаций" in msg for msg in metrics["warnings"]))
+
+    def test_empty_portfolio(self):
+        metrics = concentration.calculate_concentration_metrics([])
+
+        self.assertEqual(metrics["total_portfolio_value"], 0.0)
+        self.assertIsNone(metrics["largest_position_share"])
+        self.assertIsNone(metrics["largest_issuer_share"])
+        self.assertIsNone(metrics["position_hhi"])
+        self.assertIsNone(metrics["issuer_hhi"])
+        self.assertEqual(metrics["warnings"], [])
+
+    def test_unknown_issuer_fallback(self):
+        positions = [
+            {"name": "Bond Unknown", "isin": "UNK", "asset_type": "bond_corp", "value_end": 100.0, "nkd_end": 0.0}
+        ]
+
+        metrics = concentration.calculate_concentration_metrics(positions, issuer_by_isin={})
+
+        self.assertEqual(metrics["issuers"][0]["issuer"], "Bond Unknown")
+        self.assertEqual(metrics["issuer_fallback_count"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
