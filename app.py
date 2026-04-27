@@ -12,7 +12,7 @@ from pathlib import Path
 
 from analytics.bonds import calculate_weighted_ytm, calculate_weighted_years_to_maturity
 from analytics.cashflows import build_coupon_cashflow_by_month, build_maturity_ladder
-from analytics.data_quality import build_bond_data_quality_report
+from analytics.data_quality import build_attention_list, build_bond_data_quality_report
 import concentration
 import db
 import moex_api
@@ -101,6 +101,10 @@ PREMIUM_FILTER_OPTIONS = {
     "discount": "Ниже номинала",
     "near par": "Около номинала",
 }
+ATTENTION_NEAR_MATURITY_DAYS = 90
+ATTENTION_LOSS_PCT_THRESHOLD = -10.0
+ATTENTION_LONG_MATURITY_YEARS = 7.0
+ATTENTION_CONCENTRATION_THRESHOLD = 0.10
 
 
 def fmt(n: float) -> str:
@@ -263,6 +267,22 @@ issuer_share_map = {
     row["issuer"]: row.get("issuer_share")
     for row in concentration_metrics["issuers"]
 }
+attention_list = build_attention_list(
+    positions=pos_list,
+    position_share_map=position_share_map,
+    issuer_share_map=issuer_share_map,
+    issuer_map=issuer_by_isin,
+    ytm_map=ytm_by_isin,
+    maturity_by_isin=maturity_by_isin,
+    coupons=[dict(row) for row in coupon_calendar],
+    cost_basis=cost_basis_all,
+    as_of_date=date.today(),
+    near_maturity_days_threshold=ATTENTION_NEAR_MATURITY_DAYS,
+    loss_pct_threshold=ATTENTION_LOSS_PCT_THRESHOLD,
+    long_maturity_years_threshold=ATTENTION_LONG_MATURITY_YEARS,
+    concentration_threshold=ATTENTION_CONCENTRATION_THRESHOLD,
+    bond_asset_types=BOND_ASSET_TYPES,
+)
 
 
 # ═══════════════════════════════════════════════
@@ -483,6 +503,59 @@ with tab_overview:
                 )
             else:
                 st.info("Список бумаг с отсутствующими данными пуст.")
+
+    st.divider()
+    st.subheader("🚨 Бумаги, требующие внимания")
+    if attention_list:
+        attention_df = pd.DataFrame(attention_list).copy()
+        attention_df["position_share"] = attention_df["position_share"].apply(
+            lambda v: v * 100 if v is not None else None
+        )
+        attention_df["issuer_share"] = attention_df["issuer_share"].apply(
+            lambda v: v * 100 if v is not None else None
+        )
+        attention_df["pnl_pct"] = attention_df["pnl_pct"].apply(
+            lambda v: f"{v:.1f}%" if v is not None else "нет данных"
+        )
+        attention_df["days_to_maturity"] = attention_df["days_to_maturity"].apply(
+            lambda v: int(v) if pd.notna(v) else "нет данных"
+        )
+        attention_df = attention_df.rename(
+            columns={
+                "name": "Инструмент",
+                "isin": "ISIN",
+                "severity": "Severity",
+                "reason": "reason",
+                "suggested_action": "suggested_action",
+                "position_share": "Доля позиции %",
+                "issuer_share": "Доля эмитента %",
+                "market_value": "Полная стоимость ₽",
+                "pnl_pct": "P&L %",
+                "days_to_maturity": "Дней до погашения",
+            }
+        )
+        st.caption(
+            f"Пороги: доля > {ATTENTION_CONCENTRATION_THRESHOLD * 100:.0f}%, "
+            f"погашение ≤ {ATTENTION_NEAR_MATURITY_DAYS} дней, "
+            f"убыток ≤ {ATTENTION_LOSS_PCT_THRESHOLD:.1f}%, "
+            f"срок > {ATTENTION_LONG_MATURITY_YEARS:.1f} лет."
+        )
+        st.dataframe(
+            attention_df[[
+                "Инструмент", "ISIN", "Severity", "reason", "suggested_action",
+                "Доля позиции %", "Доля эмитента %", "P&L %",
+                "Дней до погашения", "Полная стоимость ₽"
+            ]],
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Доля позиции %": st.column_config.NumberColumn(format="%.2f%%"),
+                "Доля эмитента %": st.column_config.NumberColumn(format="%.2f%%"),
+                "Полная стоимость ₽": st.column_config.NumberColumn(format="%.2f ₽"),
+            },
+        )
+    else:
+        st.info("По текущим критериям бумаги, требующие внимания, не обнаружены.")
 
     st.divider()
 
