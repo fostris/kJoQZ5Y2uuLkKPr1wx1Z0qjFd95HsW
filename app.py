@@ -43,6 +43,7 @@ from portfolio_tables import (
     POSITIONS_WARNING_FILTER_OPTIONS,
     apply_positions_advanced_filters,
     get_positions_table_columns,
+    prepare_positions_export_table,
     prepare_positions_dataset,
     prepare_positions_display_table,
 )
@@ -1145,6 +1146,20 @@ with tab_positions:
                     "P&L ₽": st.column_config.NumberColumn(format="%+.2f ₽"),
                     "P&L %": st.column_config.NumberColumn(format="%+.1f%%"),
                 },
+            )
+
+            export_df = prepare_positions_export_table(
+                filtered=filtered,
+                type_labels=TYPE_LABELS,
+            )
+            csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
+            report_date_label = str(selected_report.get("period_end") or "report").replace(".", "-")
+            st.download_button(
+                "Скачать позиции CSV",
+                data=csv_bytes,
+                file_name=f"positions_{report_date_label}.csv",
+                mime="text/csv",
+                use_container_width=False,
             )
 
         # P&L итоги

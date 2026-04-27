@@ -389,3 +389,65 @@ def prepare_positions_display_table(
     display_df["Эмитент"] = display_df["Эмитент"].fillna("—")
     display_df["flags"] = display_df["flags"].fillna("")
     return display_df
+
+
+def prepare_positions_export_table(
+    filtered: pd.DataFrame,
+    type_labels: Mapping[str, str],
+) -> pd.DataFrame:
+    """Подготовить CSV-таблицу позиций для экспорта текущей выборки."""
+    export_df = filtered[[
+        "name", "isin", "asset_type", "issuer", "ytm",
+        "position_share", "issuer_share", "years_to_maturity",
+        "premium_discount_status", "flags", "pnl", "pnl_pct", "value_end", "nkd_end",
+    ]].copy()
+
+    export_df["type_label"] = export_df["asset_type"].map(type_labels)
+    export_df["total_value"] = export_df.apply(
+        lambda row: calculate_total_position_value(row["value_end"], row["nkd_end"]),
+        axis=1,
+    )
+    export_df["position_share_pct"] = export_df["position_share"].apply(
+        lambda v: (v * 100.0) if pd.notna(v) else None
+    )
+    export_df["issuer_share_pct"] = export_df["issuer_share"].apply(
+        lambda v: (v * 100.0) if pd.notna(v) else None
+    )
+
+    export_df = export_df.rename(
+        columns={
+            "name": "Инструмент",
+            "isin": "ISIN",
+            "type_label": "Тип",
+            "issuer": "Эмитент",
+            "ytm": "YTM %",
+            "position_share_pct": "Доля позиции %",
+            "issuer_share_pct": "Доля эмитента %",
+            "years_to_maturity": "Срок до погашения, лет",
+            "premium_discount_status": "Статус к номиналу",
+            "flags": "flags",
+            "pnl": "P&L ₽",
+            "pnl_pct": "P&L %",
+            "total_value": "Полная стоимость ₽",
+        }
+    )
+
+    export_df["Эмитент"] = export_df["Эмитент"].fillna("—")
+    export_df["flags"] = export_df["flags"].fillna("")
+    export_df["Статус к номиналу"] = export_df["Статус к номиналу"].fillna("нет данных")
+
+    return export_df[[
+        "Инструмент",
+        "ISIN",
+        "Тип",
+        "Эмитент",
+        "YTM %",
+        "Доля позиции %",
+        "Доля эмитента %",
+        "Срок до погашения, лет",
+        "Статус к номиналу",
+        "flags",
+        "P&L ₽",
+        "P&L %",
+        "Полная стоимость ₽",
+    ]]

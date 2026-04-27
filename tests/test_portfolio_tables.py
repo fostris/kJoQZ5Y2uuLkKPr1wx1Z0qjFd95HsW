@@ -10,6 +10,7 @@ from portfolio_tables import (
     apply_positions_advanced_filters,
     build_position_flags,
     get_positions_table_columns,
+    prepare_positions_export_table,
     prepare_positions_dataset,
     prepare_positions_display_table,
 )
@@ -239,6 +240,55 @@ class PortfolioTablesTests(unittest.TestCase):
         self.assertIn("скоро погашение", flags)
         self.assertIn("premium", flags)
         self.assertIn("нет cost basis", flags)
+
+    def test_prepare_positions_export_table_has_required_columns(self):
+        filtered = pd.DataFrame(
+            [
+                {
+                    "name": "Bond A",
+                    "isin": "ISIN1",
+                    "asset_type": "bond_corp",
+                    "issuer": "Issuer A",
+                    "ytm": 11.5,
+                    "position_share": 0.12,
+                    "issuer_share": 0.18,
+                    "years_to_maturity": 2.3,
+                    "premium_discount_status": "premium",
+                    "flags": ">10% позиции, premium",
+                    "pnl": 150.0,
+                    "pnl_pct": 5.5,
+                    "value_end": 2000.0,
+                    "nkd_end": 50.0,
+                }
+            ]
+        )
+
+        export_df = prepare_positions_export_table(
+            filtered=filtered,
+            type_labels={"bond_corp": "Корп. облигации"},
+        )
+
+        self.assertEqual(
+            list(export_df.columns),
+            [
+                "Инструмент",
+                "ISIN",
+                "Тип",
+                "Эмитент",
+                "YTM %",
+                "Доля позиции %",
+                "Доля эмитента %",
+                "Срок до погашения, лет",
+                "Статус к номиналу",
+                "flags",
+                "P&L ₽",
+                "P&L %",
+                "Полная стоимость ₽",
+            ],
+        )
+        self.assertAlmostEqual(export_df.iloc[0]["Доля позиции %"], 12.0)
+        self.assertAlmostEqual(export_df.iloc[0]["Доля эмитента %"], 18.0)
+        self.assertAlmostEqual(export_df.iloc[0]["Полная стоимость ₽"], 2050.0)
 
 
 if __name__ == "__main__":

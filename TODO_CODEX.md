@@ -698,8 +698,8 @@ Note (2026-04-27): added ui/charts.plot_maturity_ladder(ladder_df), reused build
 
 Что сделать:
 
-- [ ] Добавить кнопку `Скачать позиции CSV`.
-- [ ] Экспортировать текущую таблицу с новыми колонками:
+- [x] Добавить кнопку `Скачать позиции CSV`.
+- [x] Экспортировать текущую таблицу с новыми колонками:
   - YTM;
   - доля;
   - эмитент;
@@ -714,10 +714,12 @@ Note (2026-04-27): added ui/charts.plot_maturity_ladder(ladder_df), reused build
 
 Критерии готовности:
 
-- [ ] CSV скачивается.
-- [ ] Кодировка корректная.
-- [ ] Числа не превращаются в нечитаемые строки.
-- [ ] Работает после применения фильтров.
+- [x] CSV скачивается.
+- [x] Кодировка корректная.
+- [x] Числа не превращаются в нечитаемые строки.
+- [x] Работает после применения фильтров.
+
+Note (2026-04-27): added CSV export button for current filtered positions table with UTF-8-SIG encoding and export columns for YTM/share/issuer/maturity/premium-discount/flags/P&L.
 
 ---
 
