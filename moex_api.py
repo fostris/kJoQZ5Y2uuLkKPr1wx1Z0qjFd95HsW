@@ -28,6 +28,7 @@ YTM_CACHE_TTL_SEC = 300
 ISIN_SEARCH_CACHE_TTL_SEC = 3600
 FETCH_MAX_RETRIES = 3
 FETCH_RETRY_BACKOFF_SEC = 0.5
+MOEX_DATA_SOURCE = "moex_iss"
 
 _YTM_CACHE: dict[str, tuple[float, float | None]] = {}
 _ISIN_TO_TICKER_CACHE: dict[str, str | None] = {}
@@ -110,6 +111,20 @@ def _fetch_json(
     if return_status:
         return {}, status_code, str(last_error) if last_error else "unknown error"
     return {}
+
+
+def _record_sync_status(entity: str, isin: str | None, status: str, error_message: str | None = None) -> None:
+    """Сохранить свежесть/статус синхронизации, не прерывая основной поток."""
+    try:
+        db.upsert_data_sync_status(
+            data_source=MOEX_DATA_SOURCE,
+            entity=entity,
+            isin=isin,
+            status=status,
+            error_message=error_message,
+        )
+    except Exception as status_error:
+        logger.warning("Failed to persist sync status for %s/%s: %s", entity, isin, status_error)
 
 
 def _iss_to_rows(data: dict, block: str) -> list[dict]:
@@ -226,7 +241,12 @@ def get_bond_ytm_by_isin(isin: str) -> float | None:
         return None
 
     ticker = get_ticker_by_isin(isin) or isin
-    return fetch_bond_ytm(ticker)
+    ytm = fetch_bond_ytm(ticker)
+    if ytm is None:
+        _record_sync_status("ytm", isin, "error", "YTM unavailable from MOEX")
+    else:
+        _record_sync_status("ytm", isin, "success")
+    return ytm
 
 
 def format_ytm(value: float | None) -> str:
@@ -373,6 +393,7 @@ def sync_maturity_for_portfolio(positions: list) -> dict:
             amorts = get_bond_amortizations(isin)
         except Exception as e:
             stats["errors"].append(f"{name}: {e}")
+            _record_sync_status("maturity", isin, "error", str(e))
             continue
 
         stats["bonds_processed"] += 1
@@ -408,6 +429,7 @@ def sync_maturity_for_portfolio(positions: list) -> dict:
                 qty=qty,
             )
 
+        _record_sync_status("maturity", isin, "success")
         time.sleep(REQUEST_DELAY)
 
     return stats
@@ -451,6 +473,7 @@ def sync_coupons_for_portfolio(positions: list, future_only: bool = True) -> dic
             coupons = get_bond_coupons(isin)
         except Exception as e:
             stats["errors"].append(f"{name}: {e}")
+            _record_sync_status("coupon", isin, "error", str(e))
             continue
 
         stats["bonds_processed"] += 1
@@ -478,6 +501,7 @@ def sync_coupons_for_portfolio(positions: list, future_only: bool = True) -> dic
             )
             stats["synced"] += 1
 
+        _record_sync_status("coupon", isin, "success")
         # Пауза между запросами
         time.sleep(REQUEST_DELAY)
 
@@ -553,11 +577,17 @@ def get_issuer_by_isin(isin: str) -> str | None:
     """Получить название эмитента по ISIN."""
     sec = _search_security_by_isin(isin)
     if not sec:
+        if isin:
+            _record_sync_status("issuer", isin, "error", "Issuer card not found in MOEX search")
         return None
 
     issuer = sec.get("emitent_title")
     if issuer:
+        if isin:
+            _record_sync_status("issuer", isin, "success")
         return str(issuer)
+    if isin:
+        _record_sync_status("issuer", isin, "error", "Issuer title is empty in MOEX response")
     return None
 
 

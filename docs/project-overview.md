@@ -16,7 +16,8 @@
 - календарь купонов/дивидендов;
 - погашения и амортизации облигаций;
 - внешние активы для FIRE;
-- аналитические метрики (YTM, P&L, концентрация рисков, HHI).
+- аналитические метрики (YTM, P&L, концентрация рисков, HHI);
+- статусы свежести синхронизации MOEX (YTM, эмитенты, купоны, погашения).
 
 ## Технологический стек
 Подтверждено файлами проекта:
@@ -53,7 +54,7 @@
 | [formatters.py](/Users/nikita/Desktop/projects/broker-dashboard/formatters.py:1) | Форматирование рублей/процентов/null-значений для UI. |
 | [import_report.py](/Users/nikita/Desktop/projects/broker-dashboard/import_report.py:1) | CLI-импорт одного файла или директории отчётов. |
 | [fetch_gmail.py](/Users/nikita/Desktop/projects/broker-dashboard/fetch_gmail.py:1) | IMAP-загрузка отчётов из Gmail и автоимпорт в БД. |
-| [tests/](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_concentration.py:1) | Unit-тесты расчётных модулей (`concentration`, `portfolio_metrics`, `portfolio_tables`, `formatters`) и YTM-парсинга. |
+| [tests/](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_concentration.py:1) | Unit-тесты расчётных модулей (`concentration`, `portfolio_metrics`, `portfolio_tables`, `formatters`), MOEX-логики и SQL-обвязки свежести данных. |
 | [reports/](/Users/nikita/Desktop/projects/broker-dashboard/reports) | Исходные HTML-отчёты брокера. |
 | [portfolio.db](/Users/nikita/Desktop/projects/broker-dashboard/portfolio.db) | SQLite база данных (создается/обновляется кодом). |
 | [start_streamlit.sh](/Users/nikita/Desktop/projects/broker-dashboard/start_streamlit.sh:1) | Скрипт запуска Streamlit с параметрами сервера. |
@@ -119,6 +120,12 @@
 - Nullable: почти все агрегаты могут быть `None` на пустом портфеле.
 - Где используется: блок «Концентрация рисков» и колонки в таблице позиций ([app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:244), [app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:621)).
 
+### 9) Свежесть синхронизации MOEX
+- Таблица: `data_sync_status` ([db.py](/Users/nikita/Desktop/projects/broker-dashboard/db.py:136)).
+- Поля: `data_source`, `entity`, `isin`, `fetched_at`, `status`, `error_message`.
+- Функции: `upsert_data_sync_status`, `get_data_sync_freshness` ([db.py](/Users/nikita/Desktop/projects/broker-dashboard/db.py:491), [db.py](/Users/nikita/Desktop/projects/broker-dashboard/db.py:508)).
+- Где используется: подписи свежести данных в UI и фиксация статусов синхронизации из `moex_api.py` ([app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:125), [moex_api.py](/Users/nikita/Desktop/projects/broker-dashboard/moex_api.py:115)).
+
 ## Интеграции и внешние API
 ### MOEX ISS API
 Клиент: [moex_api.py](/Users/nikita/Desktop/projects/broker-dashboard/moex_api.py:1).
@@ -139,8 +146,9 @@
 - временной ряд IMOEX.
 
 Обработка ошибок:
-- `_fetch_json` ловит `URLError`/`HTTPError`, логирует и возвращает `{}` ([moex_api.py](/Users/nikita/Desktop/projects/broker-dashboard/moex_api.py:59)).
+- `_fetch_json` ловит `URLError`/`HTTPError`, делает bounded retry/backoff для временных ошибок, логирует финальный сбой и возвращает `{}` или `(payload, status, error)` при `return_status=True` ([moex_api.py](/Users/nikita/Desktop/projects/broker-dashboard/moex_api.py:68)).
 - при пустых/неполных данных функции возвращают `[]` или `None`.
+- статусы синхронизации (`success`/`error`) по `entity` и `isin` сохраняются в `data_sync_status` и доступны в UI как «свежесть данных» ([moex_api.py](/Users/nikita/Desktop/projects/broker-dashboard/moex_api.py:115), [db.py](/Users/nikita/Desktop/projects/broker-dashboard/db.py:491)).
 
 Кеширование:
 - process-local in-memory кеши в `moex_api.py` для YTM и поиска по ISIN ([moex_api.py](/Users/nikita/Desktop/projects/broker-dashboard/moex_api.py:30)).
@@ -148,7 +156,6 @@
 
 Ограничения интеграции MOEX:
 - явный rate-limit только через `REQUEST_DELAY` между синхронизационными запросами ([moex_api.py](/Users/nikita/Desktop/projects/broker-dashboard/moex_api.py:26));
-- нет retry/backoff стратегии при временных сетевых сбоях;
 - данные эмитента могут отсутствовать, тогда включается fallback по названию выпуска в модуле концентрации ([concentration.py](/Users/nikita/Desktop/projects/broker-dashboard/concentration.py:107)).
 
 ### Gmail IMAP
@@ -235,24 +242,26 @@ UI реализован в одном файле `app.py` как набор вк
 ## Тестирование
 Текущие тесты:
 - [tests/test_concentration.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_concentration.py:1): доли, группировка по эмитентам, HHI, предупреждения, пустой портфель, fallback.
-- [tests/test_moex_api_ytm.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_moex_api_ytm.py:1): парсинг YTM и форматирование.
+- [tests/test_moex_api_ytm.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_moex_api_ytm.py:1): парсинг/форматирование YTM, retry/backoff и статусы свежести синхронизации.
 - [tests/test_portfolio_metrics.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_portfolio_metrics.py:1): стоимость позиции/портфеля, P&L-сценарии, доли портфеля, edge cases `None`/нулевые значения.
 - [tests/test_portfolio_tables.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_portfolio_tables.py:1): подготовка таблицы позиций, колонки полной стоимости и P&L, устойчивость к null, неизменность исходного DataFrame.
 - [tests/test_formatters.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_formatters.py:1): форматирование рублей/процентов, `None`/`NaN` в `—`, отрицательные значения.
 - [tests/test_ui_charts.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_ui_charts.py:1): подготовка scatter `YTM vs срок до погашения`, исключение неполных строк, проверка состава tooltip и edge case без валидных точек.
 - [tests/test_report_export.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_report_export.py:1): генерация краткого HTML-отчёта, включая сценарии с полными и неполными данными.
+- [tests/test_data_sync_status.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_data_sync_status.py:1): SQL-обвязка `data_sync_status`, агрегация свежести и сохранение истории ошибок.
 
 Чем запускать:
 - `python -m unittest discover -s tests -v`
 
 Покрыто:
 - чистая бизнес-логика концентрации, портфельных метрик, подготовки таблиц и форматирования;
-- YTM-парсинг и форматирование YTM.
+- YTM-парсинг, retry/backoff и статусы свежести синхронизации MOEX;
+- SQL-функции свежести `data_sync_status`.
 
 Не покрыто (по текущему коду):
 - `app.py` (UI-ветки, визуализация, интеграционные сценарии);
 - `parser.py` (разбор реальных HTML-краевых случаев);
-- `db.py` (интеграция SQL-операций);
+- большая часть `db.py` (кроме `data_sync_status`);
 - `fetch_gmail.py` и сетевые сценарии MOEX.
 
 Как добавить новый тест:

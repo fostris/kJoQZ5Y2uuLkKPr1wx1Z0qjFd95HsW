@@ -122,6 +122,32 @@ def fmt(n: float) -> str:
     return format_rub(n)
 
 
+def format_sync_freshness_caption(entity_label: str, freshness: dict) -> str:
+    """Сформировать подпись о свежести данных синхронизации."""
+    if not freshness or freshness.get("total", 0) == 0:
+        return f"{entity_label}: синхронизация ещё не выполнялась."
+
+    success_count = int(freshness.get("success_count") or 0)
+    error_count = int(freshness.get("error_count") or 0)
+    latest_success_at = freshness.get("latest_success_at")
+    latest_error_at = freshness.get("latest_error_at")
+    latest_error_message = freshness.get("latest_error_message")
+
+    parts = []
+    if latest_success_at:
+        parts.append(f"последнее успешное обновление: {latest_success_at}")
+    else:
+        parts.append("успешных обновлений пока нет")
+    parts.append(f"успехов: {success_count}, ошибок: {error_count}")
+    if latest_error_at:
+        error_text = str(latest_error_message or "без текста ошибки").strip()
+        if len(error_text) > 120:
+            error_text = error_text[:117] + "..."
+        parts.append(f"последняя ошибка: {latest_error_at} ({error_text})")
+
+    return f"{entity_label}: " + "; ".join(parts) + "."
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_bond_ytm_map(isins: tuple[str, ...]) -> dict[str, float | None]:
     """Получить YTM по ISIN с кешем Streamlit."""
@@ -392,6 +418,7 @@ with tab_overview:
             st.info("YTM есть по всем облигационным позициям.")
     else:
         st.caption("Для расчёта YTM: нет данных по облигациям.")
+    st.caption(format_sync_freshness_caption("YTM (MOEX)", db.get_data_sync_freshness("ytm")))
 
     if missing_ytm_positions:
         missing_df = pd.DataFrame(missing_ytm_positions).copy()
@@ -670,6 +697,7 @@ with tab_overview:
         st.caption(
             f"Для {fallback_count} облигаций эмитент недоступен в API, использована временная fallback-группировка по названию выпуска."
         )
+    st.caption(format_sync_freshness_caption("Эмитенты (MOEX)", db.get_data_sync_freshness("issuer")))
 
     st.divider()
     st.subheader("📄 Экспорт краткого HTML-отчёта")
@@ -689,8 +717,8 @@ with tab_overview:
         reverse=True,
     )
     report_html = build_portfolio_summary_html(
-        report_date=str(selected_report.get("period_end") or "нет данных"),
-        portfolio_value=selected_report.get("total_end"),
+        report_date=str(selected_report["period_end"] or "нет данных"),
+        portfolio_value=selected_report["total_end"],
         bond_value=ytm_metrics.get("total_bond_value"),
         weighted_ytm=ytm_metrics.get("weighted_ytm"),
         ytm_coverage_pct=ytm_metrics.get("coverage_pct"),
@@ -700,7 +728,7 @@ with tab_overview:
         coupon_cashflow_12m=cashflow_12m_report,
         maturity_ladder=maturity_ladder_report,
     )
-    report_date_label = str(selected_report.get("period_end") or "report").replace(".", "-")
+    report_date_label = str(selected_report["period_end"] or "report").replace(".", "-")
     st.download_button(
         "Скачать краткий HTML-отчёт",
         data=report_html.encode("utf-8"),
@@ -1205,7 +1233,7 @@ with tab_positions:
                 type_labels=TYPE_LABELS,
             )
             csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
-            report_date_label = str(selected_report.get("period_end") or "report").replace(".", "-")
+            report_date_label = str(selected_report["period_end"] or "report").replace(".", "-")
             st.download_button(
                 "Скачать позиции CSV",
                 data=csv_bytes,
@@ -1416,6 +1444,7 @@ with tab_calendar:
                 for e in stats["errors"]:
                     st.warning(f"⚠️ {e}")
             st.rerun()
+    st.caption(format_sync_freshness_caption("Купоны (MOEX)", db.get_data_sync_freshness("coupon")))
 
     # ─── Отображение календаря ───
     coupons = db.get_coupon_calendar()
@@ -1687,6 +1716,7 @@ with tab_calendar:
                 for e in mat_stats["errors"]:
                     st.warning(f"⚠️ {e}")
             st.rerun()
+    st.caption(format_sync_freshness_caption("Погашения (MOEX)", db.get_data_sync_freshness("maturity")))
 
     maturities = db.get_bond_maturities()
     amortizations = db.get_bond_amortizations()

@@ -793,16 +793,16 @@ Note (2026-04-27): added retry/backoff in moex_api._fetch_json with bounded atte
 
 Что сделать:
 
-- [ ] Проверить текущую схему БД.
-- [ ] Добавить поля или отдельную таблицу:
+- [x] Проверить текущую схему БД.
+- [x] Добавить поля или отдельную таблицу:
   - `data_source`;
   - `entity`;
   - `isin`;
   - `fetched_at`;
   - `status`;
   - `error_message`.
-- [ ] Обновлять timestamp при успешной синхронизации.
-- [ ] Показывать свежесть данных в UI.
+- [x] Обновлять timestamp при успешной синхронизации.
+- [x] Показывать свежесть данных в UI.
 
 Сложность: средняя  
 Ценность: высокая  
@@ -810,9 +810,11 @@ Note (2026-04-27): added retry/backoff in moex_api._fetch_json with bounded atte
 
 Критерии готовности:
 
-- [ ] Пользователь видит дату обновления данных.
-- [ ] Ошибки синхронизации не теряются.
-- [ ] Старые данные не удаляются при временной ошибке API.
+- [x] Пользователь видит дату обновления данных.
+- [x] Ошибки синхронизации не теряются.
+- [x] Старые данные не удаляются при временной ошибке API.
+
+Note (2026-04-27): added `data_sync_status` table and DB helpers for freshness summaries; integrated status writes for YTM/issuer/coupon/maturity MOEX sync; rendered freshness captions in UI; added DB + MOEX mock tests.
 
 ---
 
@@ -821,6 +823,8 @@ Note (2026-04-27): added retry/backoff in moex_api._fetch_json with bounded atte
 Описание:
 
 Не полагаться только на `CREATE TABLE IF NOT EXISTS`.
+
+Status (2026-04-27): in progress.
 
 Что сделать:
 
@@ -1214,8 +1218,8 @@ Note (2026-04-27): added retry/backoff in moex_api._fetch_json with bounded atte
 
 ## Sprint 4 — стабильность
 
-- [ ] 6.1 Retry/backoff для MOEX API.
-- [ ] 6.2 Timestamp свежести данных.
+- [x] 6.1 Retry/backoff для MOEX API.
+- [x] 6.2 Timestamp свежести данных.
 - [ ] 6.3 Миграции БД.
 - [ ] 6.4 Тесты парсера.
 - [ ] 6.5 Тесты БД.

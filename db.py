@@ -7,6 +7,7 @@ import sqlite3
 from pathlib import Path
 from dataclasses import asdict
 from contextlib import contextmanager
+from datetime import datetime
 
 DB_PATH = Path(__file__).parent / "portfolio.db"
 
@@ -132,6 +133,16 @@ def init_db():
                 UNIQUE(ticker, record_date)
             );
 
+            CREATE TABLE IF NOT EXISTS data_sync_status (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                data_source TEXT NOT NULL,
+                entity TEXT NOT NULL,
+                isin TEXT NOT NULL DEFAULT '',
+                fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+                status TEXT NOT NULL,
+                error_message TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS rebalance_targets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 asset_type TEXT NOT NULL UNIQUE,
@@ -183,6 +194,7 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_trades_report ON trades(report_id);
             CREATE INDEX IF NOT EXISTS idx_coupon_date ON coupon_calendar(coupon_date);
             CREATE INDEX IF NOT EXISTS idx_dividend_date ON dividend_calendar(record_date);
+            CREATE INDEX IF NOT EXISTS idx_data_sync_entity ON data_sync_status(data_source, entity, isin, fetched_at);
 
             CREATE TABLE IF NOT EXISTS fire_assets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -476,6 +488,73 @@ def get_dividend_calendar():
         ).fetchall()
 
 
+# ─── Data Freshness ───
+
+def upsert_data_sync_status(
+    data_source: str,
+    entity: str,
+    isin: str | None,
+    status: str,
+    error_message: str | None = None,
+    fetched_at: str | None = None,
+):
+    """Сохранить запись статуса синхронизации данных по сущности и ISIN."""
+    normalized_isin = isin or ""
+    effective_fetched_at = fetched_at or datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO data_sync_status
+               (data_source, entity, isin, fetched_at, status, error_message)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (data_source, entity, normalized_isin, effective_fetched_at, status, error_message),
+        )
+
+
+def get_data_sync_freshness(entity: str, data_source: str = "moex_iss") -> dict:
+    """Агрегированная свежесть данных по сущности."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT isin, fetched_at, status, error_message
+               FROM data_sync_status
+               WHERE data_source = ? AND entity = ?
+               ORDER BY fetched_at DESC""",
+            (data_source, entity),
+        ).fetchall()
+
+    if not rows:
+        return {
+            "entity": entity,
+            "data_source": data_source,
+            "total": 0,
+            "success_count": 0,
+            "error_count": 0,
+            "latest_status": None,
+            "latest_at": None,
+            "latest_success_at": None,
+            "latest_error_at": None,
+            "latest_error_message": None,
+        }
+
+    success_count = sum(1 for row in rows if row["status"] == "success")
+    error_count = sum(1 for row in rows if row["status"] == "error")
+    latest_row = rows[0]
+    latest_success_row = next((row for row in rows if row["status"] == "success"), None)
+    latest_error_row = next((row for row in rows if row["status"] == "error"), None)
+
+    return {
+        "entity": entity,
+        "data_source": data_source,
+        "total": len(rows),
+        "success_count": success_count,
+        "error_count": error_count,
+        "latest_status": latest_row["status"],
+        "latest_at": latest_row["fetched_at"],
+        "latest_success_at": latest_success_row["fetched_at"] if latest_success_row else None,
+        "latest_error_at": latest_error_row["fetched_at"] if latest_error_row else None,
+        "latest_error_message": latest_error_row["error_message"] if latest_error_row else None,
+    }
+
+
 # ─── Rebalance Targets ───
 
 def get_rebalance_targets():
@@ -680,7 +759,5 @@ def sync_cost_basis_from_trades():
             )
 
     return len(calculated)
-
-
 
 

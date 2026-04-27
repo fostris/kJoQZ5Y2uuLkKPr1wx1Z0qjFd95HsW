@@ -106,5 +106,88 @@ class MoexFetchRetryTests(unittest.TestCase):
         self.assertEqual(mocked_urlopen.call_count, 1)
 
 
+class MoexDataFreshnessStatusTests(unittest.TestCase):
+    def test_get_bond_ytm_by_isin_records_success_status(self):
+        with patch("moex_api.get_ticker_by_isin", return_value="SU26219RMFS4"), patch(
+            "moex_api.fetch_bond_ytm",
+            return_value=13.4,
+        ), patch("moex_api.db.upsert_data_sync_status") as upsert_mock:
+            result = moex_api.get_bond_ytm_by_isin("RU000A0JX0J2")
+
+        self.assertEqual(result, 13.4)
+        upsert_mock.assert_called_once_with(
+            data_source=moex_api.MOEX_DATA_SOURCE,
+            entity="ytm",
+            isin="RU000A0JX0J2",
+            status="success",
+            error_message=None,
+        )
+
+    def test_get_bond_ytm_by_isin_records_error_status_when_missing(self):
+        with patch("moex_api.get_ticker_by_isin", return_value="SU26219RMFS4"), patch(
+            "moex_api.fetch_bond_ytm",
+            return_value=None,
+        ), patch("moex_api.db.upsert_data_sync_status") as upsert_mock:
+            result = moex_api.get_bond_ytm_by_isin("RU000A0JX0J2")
+
+        self.assertIsNone(result)
+        upsert_mock.assert_called_once_with(
+            data_source=moex_api.MOEX_DATA_SOURCE,
+            entity="ytm",
+            isin="RU000A0JX0J2",
+            status="error",
+            error_message="YTM unavailable from MOEX",
+        )
+
+    def test_get_issuer_by_isin_records_error_when_not_found(self):
+        with patch("moex_api._search_security_by_isin", return_value=None), patch(
+            "moex_api.db.upsert_data_sync_status",
+        ) as upsert_mock:
+            result = moex_api.get_issuer_by_isin("RU000A0JX0J2")
+
+        self.assertIsNone(result)
+        upsert_mock.assert_called_once_with(
+            data_source=moex_api.MOEX_DATA_SOURCE,
+            entity="issuer",
+            isin="RU000A0JX0J2",
+            status="error",
+            error_message="Issuer card not found in MOEX search",
+        )
+
+    @patch("moex_api.time.sleep", return_value=None)
+    def test_sync_coupons_records_success_status(self, _sleep_mock):
+        positions = [{"isin": "RU000A0JX0J2", "name": "ОФЗ", "qty": 5, "asset_type": "bond_ofz_pd"}]
+        with patch("moex_api.get_bond_coupons", return_value=[]), patch(
+            "moex_api.db.upsert_data_sync_status",
+        ) as upsert_mock:
+            stats = moex_api.sync_coupons_for_portfolio(positions, future_only=True)
+
+        self.assertEqual(stats["bonds_processed"], 1)
+        upsert_mock.assert_called_with(
+            data_source=moex_api.MOEX_DATA_SOURCE,
+            entity="coupon",
+            isin="RU000A0JX0J2",
+            status="success",
+            error_message=None,
+        )
+
+    @patch("moex_api.time.sleep", return_value=None)
+    def test_sync_maturity_records_error_status(self, _sleep_mock):
+        positions = [{"isin": "RU000A0JX0J2", "name": "ОФЗ", "qty": 5, "asset_type": "bond_ofz_pd"}]
+        with patch("moex_api.get_bond_info", side_effect=RuntimeError("moex error")), patch(
+            "moex_api.db.upsert_data_sync_status",
+        ) as upsert_mock:
+            stats = moex_api.sync_maturity_for_portfolio(positions)
+
+        self.assertEqual(stats["synced"], 0)
+        upsert_mock.assert_called_with(
+            data_source=moex_api.MOEX_DATA_SOURCE,
+            entity="maturity",
+            isin="RU000A0JX0J2",
+            status="error",
+            error_message="moex error",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
