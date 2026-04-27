@@ -52,6 +52,7 @@ from rebalancing import (
     build_rebalance_comparison,
     split_rebalance_gaps,
 )
+from ui.charts import plot_coupon_cashflow_by_month, plot_ytm_vs_maturity
 
 # ─── Инициализация ───
 db.init_db()
@@ -1082,6 +1083,37 @@ with tab_positions:
             warning_share_threshold=ATTENTION_CONCENTRATION_THRESHOLD,
         )
 
+        st.subheader("📈 YTM vs срок до погашения")
+        ytm_chart_result = plot_ytm_vs_maturity(filtered)
+        ytm_scatter = ytm_chart_result.get("figure")
+        excluded_positions = ytm_chart_result.get("excluded_positions", [])
+        included_count = int(ytm_chart_result.get("included_count") or 0)
+
+        if ytm_scatter is not None:
+            st.plotly_chart(ytm_scatter, use_container_width=True)
+            st.caption(f"В график включено позиций: {included_count}.")
+        else:
+            st.info("Недостаточно данных для графика: нужны позиции одновременно с YTM и сроком до погашения.")
+
+        if excluded_positions:
+            excluded_df = pd.DataFrame(excluded_positions).rename(
+                columns={
+                    "name": "Инструмент",
+                    "isin": "ISIN",
+                    "reason": "Причина исключения",
+                }
+            )
+            st.caption("Исключённые из графика позиции:")
+            st.dataframe(
+                excluded_df[["Инструмент", "ISIN", "Причина исключения"]],
+                hide_index=True,
+                use_container_width=True,
+            )
+        elif not filtered.empty:
+            st.caption("Все выбранные позиции включены в график.")
+
+        st.divider()
+
         # Таблица позиций
         total_value = calculate_total_portfolio_value(filtered)
         if filtered.empty:
@@ -1373,27 +1405,14 @@ with tab_calendar:
             if cashflow_12m["total_payments"] == 0:
                 st.info("На ближайшие 12 месяцев: нет данных по купонным выплатам.")
 
-            fig_monthly = go.Figure()
-            fig_monthly.add_trace(go.Bar(
-                x=cashflow_df["month_label"],
-                y=cashflow_df["income"],
-                text=cashflow_df["income"].apply(lambda v: f"{v:,.0f} ₽"),
-                textposition="outside",
-                marker_color="#22d3ee",
-                hovertemplate="<b>%{x}</b><br>Доход: %{y:,.2f} ₽<br>Выплат: %{customdata}<extra></extra>",
-                customdata=cashflow_df["payments_count"],
-            ))
-            fig_monthly.update_layout(
-                xaxis_title="",
-                yaxis_title="₽",
-                height=300,
-                margin=dict(t=20, b=40),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(fig_monthly, use_container_width=True)
+            coupon_chart_result = plot_coupon_cashflow_by_month(cashflow_df)
+            fig_monthly = coupon_chart_result.get("figure")
+            sorted_cashflow_df = coupon_chart_result.get("dataframe", cashflow_df)
+            if fig_monthly is not None:
+                st.plotly_chart(fig_monthly, use_container_width=True)
+            st.caption(f"Общая сумма купонного потока за 12 месяцев: **{fmt(cashflow_12m['total_income'])} ₽**.")
 
-            cashflow_display = cashflow_df[[
+            cashflow_display = sorted_cashflow_df[[
                 "month_label", "income", "payments_count", "bonds_text"
             ]].rename(
                 columns={

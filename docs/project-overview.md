@@ -46,6 +46,7 @@
 | [concentration.py](/Users/nikita/Desktop/projects/broker-dashboard/concentration.py:1) | Чистые функции анализа концентрации рисков (доли, HHI, предупреждения). |
 | [portfolio_metrics.py](/Users/nikita/Desktop/projects/broker-dashboard/portfolio_metrics.py:1) | Чистые расчёты портфельных метрик: стоимость позиции/портфеля, доходность, P&L, агрегаты по типам активов. |
 | [portfolio_tables.py](/Users/nikita/Desktop/projects/broker-dashboard/portfolio_tables.py:1) | Подготовка DataFrame для таблицы позиций (обогащение, сортировка, колонки отображения). |
+| [ui/charts.py](/Users/nikita/Desktop/projects/broker-dashboard/ui/charts.py:1) | Чистые helpers для графиков Plotly (например, scatter YTM vs срок до погашения). |
 | [rebalancing.py](/Users/nikita/Desktop/projects/broker-dashboard/rebalancing.py:1) | Чистые расчёты ребалансировки: текущее распределение, отклонения, перевес/недовес. |
 | [fire_metrics.py](/Users/nikita/Desktop/projects/broker-dashboard/fire_metrics.py:1) | Чистые FIRE-расчёты: базовые метрики, прогноз, glide path, Monte Carlo-перцентили и окна. |
 | [formatters.py](/Users/nikita/Desktop/projects/broker-dashboard/formatters.py:1) | Форматирование рублей/процентов/null-значений для UI. |
@@ -67,11 +68,11 @@
 3. Распарсенная модель сохраняется в SQLite через `db.import_report` ([db.py](/Users/nikita/Desktop/projects/broker-dashboard/db.py:201)).
 4. При каждом рендере выбранного отчёта `app.py` читает данные через `db.get_*` функции ([app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:164)).
 5. Дополнительные данные (MOEX) подгружаются по кнопкам синхронизации и через кешируемые загрузчики (`load_bond_ytm_map`, `load_bond_issuer_map`) ([app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:74), [app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:85)).
-6. Основные расчёты выполняются в чистых модулях (`concentration.py`, `portfolio_metrics.py`, `portfolio_tables.py`, `rebalancing.py`, `fire_metrics.py`, `formatters.py`), а `app.py` выступает оркестратором данных и UI-слоем.
+6. Основные расчёты/подготовка визуализаций выполняются в чистых модулях (`concentration.py`, `portfolio_metrics.py`, `portfolio_tables.py`, `ui/charts.py`, `rebalancing.py`, `fire_metrics.py`, `formatters.py`), а `app.py` выступает оркестратором данных и UI-слоем.
 7. Результаты отображаются в табах Streamlit (`Обзор`, `Позиции`, `Календарь`, `Ребалансировка`, `FIRE` и т.д.) ([app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:219)).
 
 Связи модулей:
-- `app.py` зависит от `db`, `parser`, `moex_api` и чистых расчётных модулей (`concentration`, `portfolio_metrics`, `portfolio_tables`, `rebalancing`, `fire_metrics`, `formatters`).
+- `app.py` зависит от `db`, `parser`, `moex_api` и чистых расчётных модулей (`concentration`, `portfolio_metrics`, `portfolio_tables`, `ui.charts`, `rebalancing`, `fire_metrics`, `formatters`).
 - `moex_api.py` зависит от `db.py` для сохранения синхронизированных данных.
 - `import_report.py` и `fetch_gmail.py` используют `parser.py` + `db.py`.
 
@@ -200,7 +201,7 @@ Edge cases:
 ## UI и компоненты
 UI реализован в одном файле `app.py` как набор вкладок Streamlit:
 - `Обзор` ([app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:224)): KPI, концентрация рисков, структура, динамика, сравнение с IMOEX.
-- `Позиции` ([app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:590)): таблица позиций, сортировки, YTM/эмитент/доли, P&L, управление средней ценой.
+- `Позиции` ([app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:590)): фильтры, scatter-график `YTM vs срок до погашения` с исключениями, таблица позиций, сортировки, YTM/эмитент/доли, P&L, управление средней ценой.
 - `Пополнения и вычет` ([app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:822)): контроль лимита вычета ИИС.
 - `Календарь` ([app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:908)): купоны, дивиденды, погашения, амортизации.
 - `Ребалансировка` ([app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:1384)): цели структуры, отклонения, рекомендации.
@@ -237,6 +238,7 @@ UI реализован в одном файле `app.py` как набор вк
 - [tests/test_portfolio_metrics.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_portfolio_metrics.py:1): стоимость позиции/портфеля, P&L-сценарии, доли портфеля, edge cases `None`/нулевые значения.
 - [tests/test_portfolio_tables.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_portfolio_tables.py:1): подготовка таблицы позиций, колонки полной стоимости и P&L, устойчивость к null, неизменность исходного DataFrame.
 - [tests/test_formatters.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_formatters.py:1): форматирование рублей/процентов, `None`/`NaN` в `—`, отрицательные значения.
+- [tests/test_ui_charts.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_ui_charts.py:1): подготовка scatter `YTM vs срок до погашения`, исключение неполных строк, проверка состава tooltip и edge case без валидных точек.
 
 Чем запускать:
 - `python -m unittest discover -s tests -v`
@@ -316,6 +318,7 @@ UI реализован в одном файле `app.py` как набор вк
 - Изменить запросы к MOEX API -> [moex_api.py](/Users/nikita/Desktop/projects/broker-dashboard/moex_api.py:59)
 - Добавить расчет концентрации/HHI -> [concentration.py](/Users/nikita/Desktop/projects/broker-dashboard/concentration.py:49)
 - Добавить новый календарный блок -> [app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:908)
+- Добавить/изменить график Plotly для UI -> [ui/charts.py](/Users/nikita/Desktop/projects/broker-dashboard/ui/charts.py:1), [app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:875)
 - Добавить логику импорта из CLI -> [import_report.py](/Users/nikita/Desktop/projects/broker-dashboard/import_report.py:41)
 - Добавить автоматизацию загрузки почты -> [fetch_gmail.py](/Users/nikita/Desktop/projects/broker-dashboard/fetch_gmail.py:78)
 - Добавить тест расчёта -> [tests/test_concentration.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_concentration.py:6)
