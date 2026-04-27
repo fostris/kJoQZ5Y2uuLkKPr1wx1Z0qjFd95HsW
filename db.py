@@ -11,6 +11,27 @@ from datetime import datetime
 
 DB_PATH = Path(__file__).parent / "portfolio.db"
 
+SCHEMA_MIGRATIONS: list[tuple[int, str, str]] = [
+    (1, "baseline_schema_snapshot", ""),
+    (
+        2,
+        "add_data_sync_status",
+        """
+        CREATE TABLE IF NOT EXISTS data_sync_status (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data_source TEXT NOT NULL,
+            entity TEXT NOT NULL,
+            isin TEXT NOT NULL DEFAULT '',
+            fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+            status TEXT NOT NULL,
+            error_message TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_data_sync_entity
+            ON data_sync_status(data_source, entity, isin, fetched_at);
+        """,
+    ),
+]
+
 
 @contextmanager
 def get_db():
@@ -26,6 +47,62 @@ def get_db():
         raise
     finally:
         conn.close()
+
+
+def _ensure_schema_migrations_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+
+
+def get_schema_version(conn: sqlite3.Connection | None = None) -> int:
+    """Текущая версия схемы БД по таблице schema_migrations."""
+    if conn is None:
+        with get_db() as local_conn:
+            return get_schema_version(local_conn)
+
+    table_exists = conn.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'schema_migrations'
+        """
+    ).fetchone()
+    if not table_exists:
+        return 0
+
+    row = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def apply_migrations(conn: sqlite3.Connection | None = None) -> int:
+    """Применить все неприменённые миграции. Возвращает число применённых миграций."""
+    if conn is None:
+        with get_db() as local_conn:
+            return apply_migrations(local_conn)
+
+    _ensure_schema_migrations_table(conn)
+    current_version = get_schema_version(conn)
+    applied_count = 0
+
+    for version, name, migration_sql in SCHEMA_MIGRATIONS:
+        if version <= current_version:
+            continue
+        if migration_sql.strip():
+            conn.executescript(migration_sql)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
+            (version, name),
+        )
+        applied_count += 1
+
+    return applied_count
 
 
 def init_db():
@@ -133,16 +210,6 @@ def init_db():
                 UNIQUE(ticker, record_date)
             );
 
-            CREATE TABLE IF NOT EXISTS data_sync_status (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                data_source TEXT NOT NULL,
-                entity TEXT NOT NULL,
-                isin TEXT NOT NULL DEFAULT '',
-                fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
-                status TEXT NOT NULL,
-                error_message TEXT
-            );
-
             CREATE TABLE IF NOT EXISTS rebalance_targets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 asset_type TEXT NOT NULL UNIQUE,
@@ -194,7 +261,6 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_trades_report ON trades(report_id);
             CREATE INDEX IF NOT EXISTS idx_coupon_date ON coupon_calendar(coupon_date);
             CREATE INDEX IF NOT EXISTS idx_dividend_date ON dividend_calendar(record_date);
-            CREATE INDEX IF NOT EXISTS idx_data_sync_entity ON data_sync_status(data_source, entity, isin, fetched_at);
 
             CREATE TABLE IF NOT EXISTS fire_assets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -208,6 +274,7 @@ def init_db():
                 UNIQUE(name)
             );
         """)
+        apply_migrations(conn)
 
 
 def import_report(report) -> int:
@@ -759,5 +826,4 @@ def sync_cost_basis_from_trades():
             )
 
     return len(calculated)
-
 

@@ -126,6 +126,11 @@
 - Функции: `upsert_data_sync_status`, `get_data_sync_freshness` ([db.py](/Users/nikita/Desktop/projects/broker-dashboard/db.py:491), [db.py](/Users/nikita/Desktop/projects/broker-dashboard/db.py:508)).
 - Где используется: подписи свежести данных в UI и фиксация статусов синхронизации из `moex_api.py` ([app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:125), [moex_api.py](/Users/nikita/Desktop/projects/broker-dashboard/moex_api.py:115)).
 
+### 10) Версионирование схемы БД
+- Таблица: `schema_migrations` (создаётся в `db.py`).
+- Функции: `get_schema_version()`, `apply_migrations()` и список `SCHEMA_MIGRATIONS` ([db.py](/Users/nikita/Desktop/projects/broker-dashboard/db.py:14)).
+- Назначение: безопасное добавление новых изменений схемы без ручных `ALTER` в проде; повторный запуск миграций идемпотентен.
+
 ## Интеграции и внешние API
 ### MOEX ISS API
 Клиент: [moex_api.py](/Users/nikita/Desktop/projects/broker-dashboard/moex_api.py:1).
@@ -249,6 +254,7 @@ UI реализован в одном файле `app.py` как набор вк
 - [tests/test_ui_charts.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_ui_charts.py:1): подготовка scatter `YTM vs срок до погашения`, исключение неполных строк, проверка состава tooltip и edge case без валидных точек.
 - [tests/test_report_export.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_report_export.py:1): генерация краткого HTML-отчёта, включая сценарии с полными и неполными данными.
 - [tests/test_data_sync_status.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_data_sync_status.py:1): SQL-обвязка `data_sync_status`, агрегация свежести и сохранение истории ошибок.
+- [tests/test_db_migrations.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_db_migrations.py:1): применение миграций на новой/старой БД и идемпотентность повторного запуска.
 
 Чем запускать:
 - `python -m unittest discover -s tests -v`
@@ -256,7 +262,8 @@ UI реализован в одном файле `app.py` как набор вк
 Покрыто:
 - чистая бизнес-логика концентрации, портфельных метрик, подготовки таблиц и форматирования;
 - YTM-парсинг, retry/backoff и статусы свежести синхронизации MOEX;
-- SQL-функции свежести `data_sync_status`.
+- SQL-функции свежести `data_sync_status`;
+- миграции БД (`schema_migrations`, `apply_migrations`, `get_schema_version`).
 
 Не покрыто (по текущему коду):
 - `app.py` (UI-ветки, визуализация, интеграционные сценарии);
