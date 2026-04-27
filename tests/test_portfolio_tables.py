@@ -8,6 +8,7 @@ from portfolio_tables import (
     POSITIONS_TABLE_VIEW_MODES,
     POSITIONS_WARNING_FILTER_OPTIONS,
     apply_positions_advanced_filters,
+    build_position_flags,
     get_positions_table_columns,
     prepare_positions_dataset,
     prepare_positions_display_table,
@@ -69,6 +70,7 @@ class PortfolioTablesTests(unittest.TestCase):
         self.assertIn("Лет до погашения", display_df.columns)
         self.assertIn("Цена к номиналу %", display_df.columns)
         self.assertIn("Статус к номиналу", display_df.columns)
+        self.assertIn("flags", display_df.columns)
 
         bond_row = display_df[display_df["Инструмент"] == "Bond A"].iloc[0]
         self.assertAlmostEqual(bond_row["Полная стоимость"], 110.0)
@@ -78,6 +80,9 @@ class PortfolioTablesTests(unittest.TestCase):
         self.assertEqual(bond_row["Лет до погашения"], "1.00")
         self.assertEqual(bond_row["Цена к номиналу %"], "50.00")
         self.assertEqual(bond_row["Статус к номиналу"], "discount")
+        self.assertIn(">10% позиции", bond_row["flags"])
+        self.assertIn(">10% эмитент", bond_row["flags"])
+        self.assertIn("discount", bond_row["flags"])
 
         stock_row = display_df[display_df["Инструмент"] == "Stock B"].iloc[0]
         self.assertTrue(pd.isna(stock_row["Полная стоимость"]))
@@ -87,6 +92,8 @@ class PortfolioTablesTests(unittest.TestCase):
         self.assertEqual(stock_row["Лет до погашения"], "нет данных")
         self.assertEqual(stock_row["Цена к номиналу %"], "нет данных")
         self.assertEqual(stock_row["Статус к номиналу"], "нет данных")
+        self.assertIn(">10% позиции", stock_row["flags"])
+        self.assertIn("нет cost basis", stock_row["flags"])
 
         self.assertNotIn("avg_price", pos_df.columns)
         self.assertTrue(pos_df.equals(original))
@@ -212,6 +219,26 @@ class PortfolioTablesTests(unittest.TestCase):
         self.assertTrue(filtered.empty)
         self.assertIn("with_warnings", POSITIONS_WARNING_FILTER_OPTIONS)
         self.assertIn("with_issues", POSITIONS_DATA_QUALITY_FILTER_OPTIONS)
+
+    def test_build_position_flags(self):
+        flags = build_position_flags(
+            row={
+                "asset_type": "bond_corp",
+                "position_share": 0.12,
+                "issuer_share": 0.11,
+                "ytm": None,
+                "days_to_maturity": 45,
+                "premium_discount_status": "premium",
+                "avg_price": None,
+            }
+        )
+
+        self.assertIn(">10% позиции", flags)
+        self.assertIn(">10% эмитент", flags)
+        self.assertIn("нет YTM", flags)
+        self.assertIn("скоро погашение", flags)
+        self.assertIn("premium", flags)
+        self.assertIn("нет cost basis", flags)
 
 
 if __name__ == "__main__":

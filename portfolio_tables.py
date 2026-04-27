@@ -37,6 +37,7 @@ POSITIONS_TABLE_COLUMNS_BY_MODE = {
         "Лет до погашения",
         "Цена к номиналу %",
         "Статус к номиналу",
+        "flags",
         "Доля портфеля %",
         "Доля эмитента %",
         "Полная стоимость",
@@ -73,6 +74,7 @@ POSITIONS_TABLE_COLUMNS_BY_MODE = {
         "Лет до погашения",
         "Цена к номиналу %",
         "Статус к номиналу",
+        "flags",
         "Полная стоимость",
     ],
     "Календарь": [
@@ -104,6 +106,7 @@ POSITIONS_TABLE_COLUMNS_BY_MODE = {
         "Лет до погашения",
         "Цена к номиналу %",
         "Статус к номиналу",
+        "flags",
         "Полная стоимость",
     ],
 }
@@ -118,6 +121,18 @@ POSITIONS_DATA_QUALITY_FILTER_OPTIONS = (
     "with_issues",
     "without_issues",
 )
+BOND_ASSET_TYPES_FOR_FLAGS = ("bond_corp", "bond_ofz_pd", "bond_ofz_in")
+
+
+def _to_float(value) -> float | None:
+    if value in (None, ""):
+        return None
+    if pd.isna(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def get_positions_table_columns(view_mode: str, available_columns: Iterable[str]) -> list[str]:
@@ -190,6 +205,49 @@ def apply_positions_advanced_filters(
     return result
 
 
+def build_position_flags(
+    row: Mapping[str, object],
+    position_threshold: float = 0.10,
+    issuer_threshold: float = 0.10,
+    near_maturity_days_threshold: int = 90,
+    bond_asset_types: tuple[str, ...] = BOND_ASSET_TYPES_FOR_FLAGS,
+) -> list[str]:
+    """Сформировать flags позиции для риск/качество-индикаторов."""
+    flags: list[str] = []
+
+    position_share = _to_float(row.get("position_share"))
+    if position_share is not None and position_share > position_threshold:
+        flags.append(">10% позиции")
+
+    issuer_share = _to_float(row.get("issuer_share"))
+    if issuer_share is not None and issuer_share > issuer_threshold:
+        flags.append(">10% эмитент")
+
+    asset_type = row.get("asset_type")
+    is_bond = asset_type in bond_asset_types
+    ytm = _to_float(row.get("ytm"))
+    if is_bond and ytm is None:
+        flags.append("нет YTM")
+
+    days_to_maturity = _to_float(row.get("days_to_maturity"))
+    if is_bond and days_to_maturity is None:
+        flags.append("нет погашения")
+    elif is_bond and days_to_maturity <= near_maturity_days_threshold:
+        flags.append("скоро погашение")
+
+    premium_discount_status = str(row.get("premium_discount_status") or "")
+    if is_bond and premium_discount_status == "premium":
+        flags.append("premium")
+    elif is_bond and premium_discount_status == "discount":
+        flags.append("discount")
+
+    avg_price = _to_float(row.get("avg_price"))
+    if avg_price is None:
+        flags.append("нет cost basis")
+
+    return flags
+
+
 def prepare_positions_dataset(
     pos_df: pd.DataFrame,
     type_filter: Iterable[str],
@@ -248,6 +306,10 @@ def prepare_positions_dataset(
     filtered["premium_discount_status"] = premium_discount_data[1]
 
     filtered = add_pnl_columns(filtered, cost_map)
+    filtered["flags"] = filtered.apply(
+        lambda row: ", ".join(build_position_flags(row, bond_asset_types=bond_asset_types)),
+        axis=1,
+    )
 
     sort_map = {
         "По стоимости": ("value_end", False),
@@ -280,7 +342,8 @@ def prepare_positions_display_table(
         "name", "asset_type", "issuer", "qty", "avg_price", "price_end", "ytm",
         "days_to_maturity", "years_to_maturity",
         "price_to_nominal_pct", "premium_discount_status",
-        "position_share", "issuer_share", "value_end", "nkd_end", "change_value", "pnl", "pnl_pct"
+        "position_share", "issuer_share", "flags",
+        "value_end", "nkd_end", "change_value", "pnl", "pnl_pct"
     ]].copy()
 
     display_df["Тип"] = display_df["asset_type"].map(type_labels)
@@ -302,6 +365,7 @@ def prepare_positions_display_table(
         "premium_discount_status": "Статус к номиналу",
         "position_share": "Доля портфеля %",
         "issuer_share": "Доля эмитента %",
+        "flags": "flags",
         "value_end": "Стоимость",
         "nkd_end": "НКД",
         "change_value": "Δ за день",
@@ -323,4 +387,5 @@ def prepare_positions_display_table(
     display_df["Доля портфеля %"] = display_df["Доля портфеля %"].apply(lambda v: v * 100 if v is not None else None)
     display_df["Доля эмитента %"] = display_df["Доля эмитента %"].apply(lambda v: v * 100 if v is not None else None)
     display_df["Эмитент"] = display_df["Эмитент"].fillna("—")
+    display_df["flags"] = display_df["flags"].fillna("")
     return display_df
