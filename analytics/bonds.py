@@ -8,6 +8,8 @@ from typing import Any, Iterable, Mapping
 
 from concentration import BOND_ASSET_TYPES, calculate_position_market_value
 
+NEAR_PAR_THRESHOLD_PCT = 0.5
+
 
 def _to_float(value: Any) -> float | None:
     if value in (None, ""):
@@ -175,3 +177,29 @@ def calculate_weighted_years_to_maturity(
         "coverage_pct": coverage_pct,
         "missing_count": missing_count,
     }
+
+
+def calculate_price_to_nominal_pct_and_status(
+    asset_type: str | None,
+    price_end: Any,
+    nominal: Any = None,
+    bond_asset_types: tuple[str, ...] = BOND_ASSET_TYPES,
+    near_par_threshold_pct: float = NEAR_PAR_THRESHOLD_PCT,
+) -> tuple[float | None, str | None]:
+    """Определить цену к номиналу (%) и статус premium/discount/near par."""
+    if asset_type not in bond_asset_types:
+        return None, None
+
+    _ = nominal  # Номинал оставлен в сигнатуре как часть контракта входных данных.
+    price_pct = _to_float(price_end)
+    if price_pct is None:
+        return None, None
+
+    if price_pct > 100.0 + near_par_threshold_pct:
+        status = "premium"
+    elif price_pct < 100.0 - near_par_threshold_pct:
+        status = "discount"
+    else:
+        status = "near par"
+
+    return price_pct, status

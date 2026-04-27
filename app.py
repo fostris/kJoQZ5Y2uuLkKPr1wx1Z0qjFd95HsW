@@ -93,6 +93,12 @@ TYPE_COLORS = {
 }
 
 BOND_ASSET_TYPES = concentration.BOND_ASSET_TYPES
+PREMIUM_FILTER_OPTIONS = {
+    "all": "Все",
+    "premium": "Выше номинала",
+    "discount": "Ниже номинала",
+    "near par": "Около номинала",
+}
 
 
 def fmt(n: float) -> str:
@@ -659,13 +665,20 @@ with tab_positions:
         cost_map = db.get_cost_basis_map()
 
         # Фильтры
-        col_filter, col_sort = st.columns(2)
+        col_filter, col_status, col_sort = st.columns(3)
         with col_filter:
             type_filter = st.multiselect(
                 "Тип актива",
                 options=list(TYPE_LABELS.keys()),
                 format_func=lambda x: TYPE_LABELS[x],
                 default=list(TYPE_LABELS.keys()),
+            )
+        with col_status:
+            premium_filter = st.selectbox(
+                "К номиналу",
+                options=list(PREMIUM_FILTER_OPTIONS.keys()),
+                format_func=lambda x: PREMIUM_FILTER_OPTIONS[x],
+                index=0,
             )
         with col_sort:
             sort_col = st.selectbox(
@@ -686,6 +699,8 @@ with tab_positions:
             maturity_by_isin=maturity_by_isin,
             as_of_date=date.today(),
         )
+        if premium_filter != "all":
+            filtered = filtered[filtered["premium_discount_status"] == premium_filter].copy()
 
         # Таблица позиций
         total_value = calculate_total_portfolio_value(filtered)
@@ -699,6 +714,7 @@ with tab_positions:
             display_df[[
                 "Инструмент", "Тип", "Эмитент", "Кол-во", "Ср. цена", "Цена", "YTM",
                 "Дней до погашения", "Лет до погашения",
+                "Цена к номиналу %", "Статус к номиналу",
                 "Доля портфеля %", "Доля эмитента %", "Полная стоимость", "Δ за день", "P&L ₽", "P&L %"
             ]],
             hide_index=True,

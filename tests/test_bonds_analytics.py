@@ -3,6 +3,7 @@ from datetime import date
 
 from analytics.bonds import (
     calculate_days_to_maturity,
+    calculate_price_to_nominal_pct_and_status,
     calculate_weighted_years_to_maturity,
     calculate_weighted_ytm,
     calculate_years_to_maturity,
@@ -146,6 +147,25 @@ class MaturityAnalyticsTests(unittest.TestCase):
         self.assertIsNone(metrics["weighted_years_to_maturity"])
         self.assertIsNone(metrics["coverage_pct"])
         self.assertEqual(metrics["missing_count"], 0)
+
+
+class PremiumDiscountTests(unittest.TestCase):
+    def test_price_to_nominal_status_98_100_105(self):
+        pct_98, status_98 = calculate_price_to_nominal_pct_and_status("bond_corp", 98.0, nominal=1000)
+        pct_100, status_100 = calculate_price_to_nominal_pct_and_status("bond_corp", 100.0, nominal=1000)
+        pct_105, status_105 = calculate_price_to_nominal_pct_and_status("bond_corp", 105.0, nominal=1000)
+
+        self.assertAlmostEqual(pct_98, 98.0)
+        self.assertEqual(status_98, "discount")
+        self.assertAlmostEqual(pct_100, 100.0)
+        self.assertEqual(status_100, "near par")
+        self.assertAlmostEqual(pct_105, 105.0)
+        self.assertEqual(status_105, "premium")
+
+    def test_non_bond_returns_no_data(self):
+        pct, status = calculate_price_to_nominal_pct_and_status("stock", 105.0, nominal=1)
+        self.assertIsNone(pct)
+        self.assertIsNone(status)
 
 
 if __name__ == "__main__":

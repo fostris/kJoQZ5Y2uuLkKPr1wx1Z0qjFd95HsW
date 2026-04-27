@@ -7,7 +7,11 @@ from typing import Mapping, Iterable
 
 import pandas as pd
 
-from analytics.bonds import calculate_days_to_maturity, calculate_years_to_maturity
+from analytics.bonds import (
+    calculate_days_to_maturity,
+    calculate_price_to_nominal_pct_and_status,
+    calculate_years_to_maturity,
+)
 from portfolio_metrics import add_pnl_columns, calculate_total_position_value
 
 
@@ -55,6 +59,19 @@ def prepare_positions_dataset(
     )
     filtered.loc[~bond_mask, ["days_to_maturity", "years_to_maturity"]] = None
 
+    premium_discount_data = filtered.apply(
+        lambda row: calculate_price_to_nominal_pct_and_status(
+            asset_type=row.get("asset_type"),
+            price_end=row.get("price_end"),
+            nominal=row.get("nominal"),
+            bond_asset_types=bond_asset_types,
+        ),
+        axis=1,
+        result_type="expand",
+    )
+    filtered["price_to_nominal_pct"] = premium_discount_data[0]
+    filtered["premium_discount_status"] = premium_discount_data[1]
+
     filtered = add_pnl_columns(filtered, cost_map)
 
     sort_map = {
@@ -87,6 +104,7 @@ def prepare_positions_display_table(
     display_df = filtered[[
         "name", "asset_type", "issuer", "qty", "avg_price", "price_end", "ytm",
         "days_to_maturity", "years_to_maturity",
+        "price_to_nominal_pct", "premium_discount_status",
         "position_share", "issuer_share", "value_end", "nkd_end", "change_value", "pnl", "pnl_pct"
     ]].copy()
 
@@ -105,6 +123,8 @@ def prepare_positions_display_table(
         "ytm": "YTM",
         "days_to_maturity": "Дней до погашения",
         "years_to_maturity": "Лет до погашения",
+        "price_to_nominal_pct": "Цена к номиналу %",
+        "premium_discount_status": "Статус к номиналу",
         "position_share": "Доля портфеля %",
         "issuer_share": "Доля эмитента %",
         "value_end": "Стоимость",
@@ -121,6 +141,10 @@ def prepare_positions_display_table(
     display_df["Лет до погашения"] = display_df["Лет до погашения"].apply(
         lambda v: f"{v:.2f}" if pd.notna(v) else "нет данных"
     )
+    display_df["Цена к номиналу %"] = display_df["Цена к номиналу %"].apply(
+        lambda v: f"{v:.2f}" if pd.notna(v) else "нет данных"
+    )
+    display_df["Статус к номиналу"] = display_df["Статус к номиналу"].fillna("нет данных")
     display_df["Доля портфеля %"] = display_df["Доля портфеля %"].apply(lambda v: v * 100 if v is not None else None)
     display_df["Доля эмитента %"] = display_df["Доля эмитента %"].apply(lambda v: v * 100 if v is not None else None)
     display_df["Эмитент"] = display_df["Эмитент"].fillna("—")

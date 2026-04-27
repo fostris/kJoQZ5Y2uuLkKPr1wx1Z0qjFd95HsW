@@ -59,6 +59,8 @@ class PortfolioTablesTests(unittest.TestCase):
         self.assertIn("P&L %", display_df.columns)
         self.assertIn("Дней до погашения", display_df.columns)
         self.assertIn("Лет до погашения", display_df.columns)
+        self.assertIn("Цена к номиналу %", display_df.columns)
+        self.assertIn("Статус к номиналу", display_df.columns)
 
         bond_row = display_df[display_df["Инструмент"] == "Bond A"].iloc[0]
         self.assertAlmostEqual(bond_row["Полная стоимость"], 110.0)
@@ -66,6 +68,8 @@ class PortfolioTablesTests(unittest.TestCase):
         self.assertAlmostEqual(bond_row["P&L %"], 22.2222222222, places=6)
         self.assertEqual(bond_row["Дней до погашения"], 365)
         self.assertEqual(bond_row["Лет до погашения"], "1.00")
+        self.assertEqual(bond_row["Цена к номиналу %"], "50.00")
+        self.assertEqual(bond_row["Статус к номиналу"], "discount")
 
         stock_row = display_df[display_df["Инструмент"] == "Stock B"].iloc[0]
         self.assertTrue(pd.isna(stock_row["Полная стоимость"]))
@@ -73,6 +77,8 @@ class PortfolioTablesTests(unittest.TestCase):
         self.assertTrue(pd.isna(stock_row["P&L %"]))
         self.assertEqual(stock_row["Дней до погашения"], "нет данных")
         self.assertEqual(stock_row["Лет до погашения"], "нет данных")
+        self.assertEqual(stock_row["Цена к номиналу %"], "нет данных")
+        self.assertEqual(stock_row["Статус к номиналу"], "нет данных")
 
         self.assertNotIn("avg_price", pos_df.columns)
         self.assertTrue(pos_df.equals(original))
