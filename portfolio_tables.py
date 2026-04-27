@@ -108,6 +108,17 @@ POSITIONS_TABLE_COLUMNS_BY_MODE = {
     ],
 }
 
+POSITIONS_WARNING_FILTER_OPTIONS = (
+    "all",
+    "with_warnings",
+    "without_warnings",
+)
+POSITIONS_DATA_QUALITY_FILTER_OPTIONS = (
+    "all",
+    "with_issues",
+    "without_issues",
+)
+
 
 def get_positions_table_columns(view_mode: str, available_columns: Iterable[str]) -> list[str]:
     """Подобрать колонки для выбранного режима, безопасно пропуская отсутствующие."""
@@ -116,6 +127,67 @@ def get_positions_table_columns(view_mode: str, available_columns: Iterable[str]
     preferred = POSITIONS_TABLE_COLUMNS_BY_MODE[mode]
     columns = [column for column in preferred if column in available]
     return columns if columns else available
+
+
+def apply_positions_advanced_filters(
+    filtered: pd.DataFrame,
+    issuer_filter: Iterable[str] | None = None,
+    ytm_range: tuple[float, float] | None = None,
+    position_share_range: tuple[float, float] | None = None,
+    years_to_maturity_range: tuple[float, float] | None = None,
+    warning_filter: str = "all",
+    data_quality_filter: str = "all",
+    premium_filter: str = "all",
+    data_quality_isins: set[str] | None = None,
+    warning_share_threshold: float = 0.10,
+) -> pd.DataFrame:
+    """Применить расширенные фильтры позиций (совместно и безопасно)."""
+    result = filtered.copy()
+    issuers = [issuer for issuer in (issuer_filter or []) if issuer]
+
+    if premium_filter != "all":
+        result = result[result["premium_discount_status"] == premium_filter]
+
+    if issuers:
+        result = result[result["issuer"].isin(issuers)]
+
+    if ytm_range is not None:
+        ytm_min, ytm_max = ytm_range
+        result = result[result["ytm"].notna() & result["ytm"].between(ytm_min, ytm_max, inclusive="both")]
+
+    if position_share_range is not None:
+        pos_min, pos_max = position_share_range
+        result = result[
+            result["position_share"].notna()
+            & result["position_share"].between(pos_min, pos_max, inclusive="both")
+        ]
+
+    if years_to_maturity_range is not None:
+        years_min, years_max = years_to_maturity_range
+        result = result[
+            result["years_to_maturity"].notna()
+            & result["years_to_maturity"].between(years_min, years_max, inclusive="both")
+        ]
+
+    if warning_filter in POSITIONS_WARNING_FILTER_OPTIONS and warning_filter != "all":
+        warning_mask = (
+            (result["position_share"].fillna(0) > warning_share_threshold)
+            | (result["issuer_share"].fillna(0) > warning_share_threshold)
+        )
+        if warning_filter == "with_warnings":
+            result = result[warning_mask]
+        elif warning_filter == "without_warnings":
+            result = result[~warning_mask]
+
+    issue_isins = {isin for isin in (data_quality_isins or set()) if isinstance(isin, str) and isin and isin != "—"}
+    if data_quality_filter in POSITIONS_DATA_QUALITY_FILTER_OPTIONS and data_quality_filter != "all":
+        quality_mask = result["isin"].where(result["isin"].notna(), "").isin(issue_isins)
+        if data_quality_filter == "with_issues":
+            result = result[quality_mask]
+        elif data_quality_filter == "without_issues":
+            result = result[~quality_mask]
+
+    return result
 
 
 def prepare_positions_dataset(

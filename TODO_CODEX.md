@@ -544,14 +544,14 @@ Note (2026-04-27): added table view modes (including all-columns mode), safe col
 
 Фильтры:
 
-- [ ] asset type;
-- [ ] эмитент;
-- [ ] YTM min/max;
-- [ ] доля позиции min/max;
-- [ ] срок до погашения min/max;
-- [ ] есть предупреждения;
-- [ ] есть проблемы качества данных;
-- [ ] premium / discount / near par.
+- [x] asset type;
+- [x] эмитент;
+- [x] YTM min/max;
+- [x] доля позиции min/max;
+- [x] срок до погашения min/max;
+- [x] есть предупреждения;
+- [x] есть проблемы качества данных;
+- [x] premium / discount / near par.
 
 Сложность: средняя  
 Ценность: высокая  
@@ -559,10 +559,12 @@ Note (2026-04-27): added table view modes (including all-columns mode), safe col
 
 Критерии готовности:
 
-- [ ] Фильтры работают совместно.
-- [ ] Есть кнопка сброса фильтров.
-- [ ] Если фильтр ничего не нашёл — показывается понятное сообщение.
-- [ ] Фильтры не ломают графики и KPI.
+- [x] Фильтры работают совместно.
+- [x] Есть кнопка сброса фильтров.
+- [x] Если фильтр ничего не нашёл — показывается понятное сообщение.
+- [x] Фильтры не ломают графики и KPI.
+
+Note (2026-04-27): implemented combined bond filters (asset type, issuer, YTM/share/maturity ranges, warning/data-quality flags, premium status), added reset button and empty-result message, and covered filter logic with tests.
 
 ---
 
@@ -1193,7 +1195,7 @@ Bar chart по годам.
 - [x] 2.2 Расширенные предупреждения по концентрации.
 - [x] 2.3 Бумаги, требующие внимания.
 - [x] 3.1 Режимы таблицы.
-- [ ] 3.2 Фильтры.
+- [x] 3.2 Фильтры.
 - [ ] 3.3 Badges / flags.
 
 ## Sprint 4 — стабильность

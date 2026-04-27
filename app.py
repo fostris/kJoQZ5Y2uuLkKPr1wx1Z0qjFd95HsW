@@ -38,7 +38,10 @@ from portfolio_metrics import (
     calculate_trades_stats,
 )
 from portfolio_tables import (
+    POSITIONS_DATA_QUALITY_FILTER_OPTIONS,
     POSITIONS_TABLE_VIEW_MODES,
+    POSITIONS_WARNING_FILTER_OPTIONS,
+    apply_positions_advanced_filters,
     get_positions_table_columns,
     prepare_positions_dataset,
     prepare_positions_display_table,
@@ -883,7 +886,16 @@ with tab_positions:
         # Загрузка средних цен
         cost_map = cost_basis_all
 
-        # Фильтры
+        filters_state_id = int(st.session_state.get("positions_filters_state_id", 0))
+        reset_col, _ = st.columns([1, 4])
+        with reset_col:
+            if st.button("Сбросить фильтры", key=f"positions_reset_filters_{filters_state_id}"):
+                st.session_state["positions_filters_state_id"] = filters_state_id + 1
+                st.rerun()
+
+        filters_state_id = int(st.session_state.get("positions_filters_state_id", 0))
+
+        # Базовые фильтры
         col_filter, col_status, col_sort = st.columns(3)
         with col_filter:
             type_filter = st.multiselect(
@@ -891,6 +903,7 @@ with tab_positions:
                 options=list(TYPE_LABELS.keys()),
                 format_func=lambda x: TYPE_LABELS[x],
                 default=list(TYPE_LABELS.keys()),
+                key=f"positions_type_filter_{filters_state_id}",
             )
         with col_status:
             premium_filter = st.selectbox(
@@ -898,11 +911,13 @@ with tab_positions:
                 options=list(PREMIUM_FILTER_OPTIONS.keys()),
                 format_func=lambda x: PREMIUM_FILTER_OPTIONS[x],
                 index=0,
+                key=f"positions_premium_filter_{filters_state_id}",
             )
         with col_sort:
             sort_col = st.selectbox(
                 "Сортировка",
                 ["По стоимости", "По изменению", "По P&L", "По YTM", "По имени"],
+                key=f"positions_sort_col_{filters_state_id}",
             )
 
         filtered = prepare_positions_dataset(
@@ -918,38 +933,187 @@ with tab_positions:
             maturity_by_isin=maturity_by_isin,
             as_of_date=date.today(),
         )
-        if premium_filter != "all":
-            filtered = filtered[filtered["premium_discount_status"] == premium_filter].copy()
+
+        # Расширенные фильтры
+        warning_filter_labels = {
+            "all": "Все",
+            "with_warnings": "Есть предупреждения",
+            "without_warnings": "Без предупреждений",
+        }
+        data_quality_filter_labels = {
+            "all": "Все",
+            "with_issues": "Есть проблемы качества",
+            "without_issues": "Без проблем качества",
+        }
+
+        issuer_options = sorted({
+            issuer
+            for issuer in filtered["issuer"].dropna().tolist()
+            if isinstance(issuer, str) and issuer
+        })
+
+        adv_col1, adv_col2, adv_col3 = st.columns(3)
+        with adv_col1:
+            issuer_filter = st.multiselect(
+                "Эмитент",
+                options=issuer_options,
+                default=[],
+                key=f"positions_issuer_filter_{filters_state_id}",
+            )
+        with adv_col2:
+            warning_filter = st.selectbox(
+                "Предупреждения",
+                options=list(POSITIONS_WARNING_FILTER_OPTIONS),
+                format_func=lambda x: warning_filter_labels.get(x, x),
+                index=0,
+                key=f"positions_warning_filter_{filters_state_id}",
+            )
+        with adv_col3:
+            data_quality_filter = st.selectbox(
+                "Качество данных",
+                options=list(POSITIONS_DATA_QUALITY_FILTER_OPTIONS),
+                format_func=lambda x: data_quality_filter_labels.get(x, x),
+                index=0,
+                key=f"positions_quality_filter_{filters_state_id}",
+            )
+
+        range_col1, range_col2, range_col3 = st.columns(3)
+
+        ytm_range = None
+        ytm_values = filtered["ytm"].dropna()
+        with range_col1:
+            use_ytm_filter = st.checkbox(
+                "YTM min/max",
+                value=False,
+                key=f"positions_use_ytm_filter_{filters_state_id}",
+            )
+            if use_ytm_filter:
+                if ytm_values.empty:
+                    st.caption("Нет данных YTM для выбранных позиций.")
+                else:
+                    ytm_min_value = float(ytm_values.min())
+                    ytm_max_value = float(ytm_values.max())
+                    if ytm_min_value == ytm_max_value:
+                        ytm_range = (ytm_min_value, ytm_max_value)
+                        st.caption(f"Доступно одно значение YTM: {ytm_min_value:.2f}%")
+                    else:
+                        ytm_range = st.slider(
+                            "Диапазон YTM, %",
+                            min_value=ytm_min_value,
+                            max_value=ytm_max_value,
+                            value=(ytm_min_value, ytm_max_value),
+                            step=0.1,
+                            key=f"positions_ytm_range_{filters_state_id}",
+                        )
+
+        position_share_range = None
+        position_share_values = (filtered["position_share"].dropna() * 100.0)
+        with range_col2:
+            use_position_share_filter = st.checkbox(
+                "Доля позиции min/max",
+                value=False,
+                key=f"positions_use_share_filter_{filters_state_id}",
+            )
+            if use_position_share_filter:
+                if position_share_values.empty:
+                    st.caption("Нет данных доли позиции для выбранных позиций.")
+                else:
+                    share_min_value = float(position_share_values.min())
+                    share_max_value = float(position_share_values.max())
+                    if share_min_value == share_max_value:
+                        position_share_range = (share_min_value / 100.0, share_max_value / 100.0)
+                        st.caption(f"Доступно одно значение доли: {share_min_value:.2f}%")
+                    else:
+                        selected_share_range = st.slider(
+                            "Диапазон доли, %",
+                            min_value=share_min_value,
+                            max_value=share_max_value,
+                            value=(share_min_value, share_max_value),
+                            step=0.1,
+                            key=f"positions_share_range_{filters_state_id}",
+                        )
+                        position_share_range = (
+                            selected_share_range[0] / 100.0,
+                            selected_share_range[1] / 100.0,
+                        )
+
+        years_to_maturity_range = None
+        years_values = filtered["years_to_maturity"].dropna()
+        with range_col3:
+            use_maturity_filter = st.checkbox(
+                "Срок до погашения min/max",
+                value=False,
+                key=f"positions_use_maturity_filter_{filters_state_id}",
+            )
+            if use_maturity_filter:
+                if years_values.empty:
+                    st.caption("Нет данных срока до погашения для выбранных позиций.")
+                else:
+                    years_min_value = float(years_values.min())
+                    years_max_value = float(years_values.max())
+                    if years_min_value == years_max_value:
+                        years_to_maturity_range = (years_min_value, years_max_value)
+                        st.caption(f"Доступно одно значение срока: {years_min_value:.2f} лет")
+                    else:
+                        years_to_maturity_range = st.slider(
+                            "Диапазон срока, лет",
+                            min_value=years_min_value,
+                            max_value=years_max_value,
+                            value=(years_min_value, years_max_value),
+                            step=0.1,
+                            key=f"positions_maturity_range_{filters_state_id}",
+                        )
+
+        data_quality_isins = {
+            str(row.get("isin"))
+            for row in data_quality_report.get("bonds", [])
+            if isinstance(row.get("isin"), str) and row.get("isin")
+        }
+        filtered = apply_positions_advanced_filters(
+            filtered=filtered,
+            issuer_filter=issuer_filter,
+            ytm_range=ytm_range,
+            position_share_range=position_share_range,
+            years_to_maturity_range=years_to_maturity_range,
+            warning_filter=warning_filter,
+            data_quality_filter=data_quality_filter,
+            premium_filter=premium_filter,
+            data_quality_isins=data_quality_isins,
+            warning_share_threshold=ATTENTION_CONCENTRATION_THRESHOLD,
+        )
 
         # Таблица позиций
         total_value = calculate_total_portfolio_value(filtered)
-        display_df = prepare_positions_display_table(
-            filtered=filtered,
-            type_labels=TYPE_LABELS,
-            format_ytm_fn=moex_api.format_ytm,
-        )
+        if filtered.empty:
+            st.info("По выбранным фильтрам позиции не найдены. Нажмите «Сбросить фильтры» или расширьте диапазоны.")
+        else:
+            display_df = prepare_positions_display_table(
+                filtered=filtered,
+                type_labels=TYPE_LABELS,
+                format_ytm_fn=moex_api.format_ytm,
+            )
 
-        selected_columns = get_positions_table_columns(
-            view_mode=view_mode,
-            available_columns=display_df.columns,
-        )
+            selected_columns = get_positions_table_columns(
+                view_mode=view_mode,
+                available_columns=display_df.columns,
+            )
 
-        st.dataframe(
-            display_df[selected_columns],
-            hide_index=True,
-            use_container_width=True,
-            height=min(700, len(filtered) * 38 + 40),
-            column_config={
-                "Ср. цена": st.column_config.NumberColumn(format="%.2f ₽"),
-                "Цена": st.column_config.NumberColumn(format="%.2f ₽"),
-                "Доля портфеля %": st.column_config.NumberColumn(format="%.1f%%"),
-                "Доля эмитента %": st.column_config.NumberColumn(format="%.1f%%"),
-                "Полная стоимость": st.column_config.NumberColumn(format="%.2f ₽"),
-                "Δ за день": st.column_config.NumberColumn(format="%+.2f ₽"),
-                "P&L ₽": st.column_config.NumberColumn(format="%+.2f ₽"),
-                "P&L %": st.column_config.NumberColumn(format="%+.1f%%"),
-            },
-        )
+            st.dataframe(
+                display_df[selected_columns],
+                hide_index=True,
+                use_container_width=True,
+                height=min(700, len(filtered) * 38 + 40),
+                column_config={
+                    "Ср. цена": st.column_config.NumberColumn(format="%.2f ₽"),
+                    "Цена": st.column_config.NumberColumn(format="%.2f ₽"),
+                    "Доля портфеля %": st.column_config.NumberColumn(format="%.1f%%"),
+                    "Доля эмитента %": st.column_config.NumberColumn(format="%.1f%%"),
+                    "Полная стоимость": st.column_config.NumberColumn(format="%.2f ₽"),
+                    "Δ за день": st.column_config.NumberColumn(format="%+.2f ₽"),
+                    "P&L ₽": st.column_config.NumberColumn(format="%+.2f ₽"),
+                    "P&L %": st.column_config.NumberColumn(format="%+.1f%%"),
+                },
+            )
 
         # P&L итоги
         pnl_summary = calculate_pnl_summary(filtered, cost_map)

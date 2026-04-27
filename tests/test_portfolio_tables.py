@@ -4,7 +4,10 @@ from datetime import date
 import pandas as pd
 
 from portfolio_tables import (
+    POSITIONS_DATA_QUALITY_FILTER_OPTIONS,
     POSITIONS_TABLE_VIEW_MODES,
+    POSITIONS_WARNING_FILTER_OPTIONS,
+    apply_positions_advanced_filters,
     get_positions_table_columns,
     prepare_positions_dataset,
     prepare_positions_display_table,
@@ -126,6 +129,89 @@ class PortfolioTablesTests(unittest.TestCase):
 
         empty_intersection_columns = get_positions_table_columns("Календарь", ["Инструмент"])
         self.assertEqual(empty_intersection_columns, ["Инструмент"])
+
+    def test_apply_positions_advanced_filters_combined(self):
+        source = pd.DataFrame(
+            [
+                {
+                    "name": "Bond A",
+                    "isin": "ISIN1",
+                    "issuer": "Issuer A",
+                    "ytm": 12.0,
+                    "position_share": 0.14,
+                    "issuer_share": 0.16,
+                    "years_to_maturity": 2.5,
+                    "premium_discount_status": "premium",
+                },
+                {
+                    "name": "Bond B",
+                    "isin": "ISIN2",
+                    "issuer": "Issuer B",
+                    "ytm": 9.0,
+                    "position_share": 0.07,
+                    "issuer_share": 0.07,
+                    "years_to_maturity": 5.0,
+                    "premium_discount_status": "discount",
+                },
+                {
+                    "name": "Bond C",
+                    "isin": "ISIN3",
+                    "issuer": "Issuer C",
+                    "ytm": 11.0,
+                    "position_share": 0.12,
+                    "issuer_share": 0.12,
+                    "years_to_maturity": 8.0,
+                    "premium_discount_status": "near par",
+                },
+            ]
+        )
+
+        filtered = apply_positions_advanced_filters(
+            filtered=source,
+            issuer_filter=["Issuer A"],
+            ytm_range=(10.0, 15.0),
+            position_share_range=(0.10, 0.20),
+            years_to_maturity_range=(1.0, 3.0),
+            warning_filter="with_warnings",
+            data_quality_filter="without_issues",
+            premium_filter="premium",
+            data_quality_isins={"ISIN2"},
+            warning_share_threshold=0.10,
+        )
+
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered.iloc[0]["isin"], "ISIN1")
+
+    def test_apply_positions_advanced_filters_no_results(self):
+        source = pd.DataFrame(
+            [
+                {
+                    "name": "Bond A",
+                    "isin": "ISIN1",
+                    "issuer": "Issuer A",
+                    "ytm": 12.0,
+                    "position_share": 0.14,
+                    "issuer_share": 0.16,
+                    "years_to_maturity": 2.5,
+                    "premium_discount_status": "premium",
+                }
+            ]
+        )
+
+        filtered = apply_positions_advanced_filters(
+            filtered=source,
+            issuer_filter=["Issuer A"],
+            ytm_range=(13.0, 20.0),
+            warning_filter="without_warnings",
+            data_quality_filter="with_issues",
+            premium_filter="discount",
+            data_quality_isins={"ISIN1"},
+            warning_share_threshold=0.10,
+        )
+
+        self.assertTrue(filtered.empty)
+        self.assertIn("with_warnings", POSITIONS_WARNING_FILTER_OPTIONS)
+        self.assertIn("with_issues", POSITIONS_DATA_QUALITY_FILTER_OPTIONS)
 
 
 if __name__ == "__main__":
