@@ -17,6 +17,7 @@ import concentration
 import db
 import moex_api
 import parser as bp
+from report_export import build_portfolio_summary_html
 from fire_metrics import (
     build_contribution_series,
     build_fire_projection,
@@ -265,6 +266,18 @@ data_quality_report = build_bond_data_quality_report(
     cost_basis=cost_basis_all,
     amortizations=[dict(row) for row in bond_amortizations],
     bond_asset_types=BOND_ASSET_TYPES,
+)
+cashflow_12m_report = build_coupon_cashflow_by_month(
+    coupons=[dict(row) for row in coupon_calendar],
+    positions=pos_list,
+    months=12,
+    as_of_date=date.today(),
+)
+maturity_ladder_report = build_maturity_ladder(
+    positions=pos_list,
+    maturities=[dict(row) for row in maturities],
+    amortizations=[dict(row) for row in bond_amortizations],
+    as_of_date=date.today(),
 )
 
 position_share_map = {}
@@ -657,6 +670,45 @@ with tab_overview:
         st.caption(
             f"Для {fallback_count} облигаций эмитент недоступен в API, использована временная fallback-группировка по названию выпуска."
         )
+
+    st.divider()
+    st.subheader("📄 Экспорт краткого HTML-отчёта")
+
+    top_positions_for_report = sorted(
+        [
+            {
+                "name": row.get("name"),
+                "isin": row.get("isin"),
+                "position_share": row.get("position_share"),
+                "market_value": row.get("market_value"),
+            }
+            for row in concentration_metrics.get("positions", [])
+            if row.get("position_share") is not None
+        ],
+        key=lambda item: float(item.get("position_share") or 0.0),
+        reverse=True,
+    )
+    report_html = build_portfolio_summary_html(
+        report_date=str(selected_report.get("period_end") or "нет данных"),
+        portfolio_value=selected_report.get("total_end"),
+        bond_value=ytm_metrics.get("total_bond_value"),
+        weighted_ytm=ytm_metrics.get("weighted_ytm"),
+        ytm_coverage_pct=ytm_metrics.get("coverage_pct"),
+        largest_positions=top_positions_for_report,
+        largest_issuers=concentration_metrics.get("issuers", []),
+        warnings=concentration_metrics.get("warning_items", []),
+        coupon_cashflow_12m=cashflow_12m_report,
+        maturity_ladder=maturity_ladder_report,
+    )
+    report_date_label = str(selected_report.get("period_end") or "report").replace(".", "-")
+    st.download_button(
+        "Скачать краткий HTML-отчёт",
+        data=report_html.encode("utf-8"),
+        file_name=f"portfolio_summary_{report_date_label}.html",
+        mime="text/html",
+        use_container_width=False,
+    )
+    st.caption("Отчёт включает ключевые метрики, крупнейшие позиции/эмитентов, предупреждения, купонный поток и лестницу погашений.")
 
     st.divider()
 
