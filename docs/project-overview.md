@@ -117,7 +117,7 @@
 
 ### 8) Метрики концентрации
 - Где определено: return-структура `calculate_concentration_metrics` ([concentration.py](/Users/nikita/Desktop/projects/broker-dashboard/concentration.py:171)).
-- Ключи: `positions`, `issuers`, `largest_*_share`, `corporate_bonds_share`, `position_hhi`, `issuer_hhi`, `warnings`.
+- Ключи: `positions`, `issuers`, `sectors`, `issuer_groups`, `largest_*_share`, `corporate_bonds_share`, `position_hhi`, `issuer_hhi`, `warnings`.
 - Nullable: почти все агрегаты могут быть `None` на пустом портфеле.
 - Где используется: блок «Концентрация рисков» и колонки в таблице позиций ([app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:244), [app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:621)).
 
@@ -131,6 +131,12 @@
 - Таблица: `schema_migrations` (создаётся в `db.py`).
 - Функции: `get_schema_version()`, `apply_migrations()` и список `SCHEMA_MIGRATIONS` ([db.py](/Users/nikita/Desktop/projects/broker-dashboard/db.py:14)).
 - Назначение: безопасное добавление новых изменений схемы без ручных `ALTER` в проде; повторный запуск миграций идемпотентен.
+
+### 11) Ручной справочник эмитентов
+- Таблица: `issuer_reference`.
+- Поля: `issuer_name`, `issuer_group`, `sector`, `issuer_type`, `comment`, `updated_at`.
+- Функции: `get_issuer_references`, `get_issuer_reference_map`, `upsert_issuer_reference`, `delete_issuer_reference`.
+- Где используется: редактирование в UI на вкладке `Обзор` и расчёт концентрации по секторам/группам.
 
 ## Интеграции и внешние API
 ### MOEX ISS API
@@ -205,6 +211,7 @@ Edge cases:
 - Расчёты: [concentration.py](/Users/nikita/Desktop/projects/broker-dashboard/concentration.py:171).
 - HHI: `sum(share^2)` в диапазоне долей 0..1 ([concentration.py](/Users/nikita/Desktop/projects/broker-dashboard/concentration.py:49)).
 - Предупреждения по порогам вынесены в константы ([concentration.py](/Users/nikita/Desktop/projects/broker-dashboard/concentration.py:8)).
+- Поддержаны агрегаты концентрации по `sector` и `issuer_group`; при пустом справочнике используется fallback (`sector = "Не указан"`, `issuer_group = issuer`).
 
 ### Календари выплат/погашений
 - Синхронизация с MOEX и upsert в SQLite:
@@ -247,7 +254,7 @@ UI реализован в одном файле `app.py` как набор вк
 
 ## Тестирование
 Текущие тесты:
-- [tests/test_concentration.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_concentration.py:1): доли, группировка по эмитентам, HHI, предупреждения, пустой портфель, fallback.
+- [tests/test_concentration.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_concentration.py:1): доли, группировка по эмитентам/сектору/группе, HHI, предупреждения, пустой портфель, fallback.
 - [tests/test_moex_api_ytm.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_moex_api_ytm.py:1): парсинг/форматирование YTM, retry/backoff и статусы свежести синхронизации.
 - [tests/test_portfolio_metrics.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_portfolio_metrics.py:1): стоимость позиции/портфеля, P&L-сценарии, доли портфеля, edge cases `None`/нулевые значения.
 - [tests/test_portfolio_tables.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_portfolio_tables.py:1): подготовка таблицы позиций, колонки полной стоимости и P&L, устойчивость к null, неизменность исходного DataFrame.
@@ -301,8 +308,8 @@ UI реализован в одном файле `app.py` как набор вк
 ## Текущие ограничения и технический долг
 Факты по текущему коду:
 - `app.py` очень большой и совмещает UI, часть бизнес-логики и оркестрацию сетевых запросов ([app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:1)).
-- Отсутствует отдельный слой миграций БД; схема изменяется в `init_db()` через `CREATE TABLE IF NOT EXISTS` ([db.py](/Users/nikita/Desktop/projects/broker-dashboard/db.py:30)).
-- Тесты покрывают только часть расчетных модулей, но не интеграции и UI.
+- Слой миграций БД присутствует, но всё ещё остаётся смешанный подход: базовая схема создаётся в `init_db()`, а эволюционные изменения — через `SCHEMA_MIGRATIONS`.
+- UI-ветки (`app.py`) остаются без прямых автоматизированных тестов.
 - В `README` и `fetch_gmail.py` упоминается `.env.example`, но файла в репозитории нет.
 - `fetch_gmail.py` использует `python-dotenv` как опциональную зависимость, но она отсутствует в `requirements.txt`.
 - Вызовы внешнего API из UI зависят от сетевой доступности и выполняются синхронно в пользовательском потоке (через кнопки синхронизации в `app.py`).
@@ -331,7 +338,7 @@ UI реализован в одном файле `app.py` как набор вк
 
 ### Новые тесты
 - Расчетные: в `tests/` по шаблону `unittest`;
-- Интеграционные/DB: рекомендован отдельный модуль, например `tests/test_db_integration.py` (пока не создан).
+- Интеграционные/DB: использовать существующий модуль `tests/test_db_integration.py` как основу и расширять сценарии.
 
 ## Карта проекта для быстрого старта
 - Добавить новую метрику портфеля -> [app.py](/Users/nikita/Desktop/projects/broker-dashboard/app.py:224), [concentration.py](/Users/nikita/Desktop/projects/broker-dashboard/concentration.py:171)

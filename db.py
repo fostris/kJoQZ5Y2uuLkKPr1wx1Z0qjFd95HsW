@@ -30,6 +30,23 @@ SCHEMA_MIGRATIONS: list[tuple[int, str, str]] = [
             ON data_sync_status(data_source, entity, isin, fetched_at);
         """,
     ),
+    (
+        3,
+        "add_issuer_reference",
+        """
+        CREATE TABLE IF NOT EXISTS issuer_reference (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            issuer_name TEXT NOT NULL UNIQUE,
+            issuer_group TEXT DEFAULT '',
+            sector TEXT DEFAULT '',
+            issuer_type TEXT DEFAULT '',
+            comment TEXT DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_issuer_reference_name
+            ON issuer_reference(issuer_name);
+        """,
+    ),
 ]
 
 
@@ -622,6 +639,67 @@ def get_data_sync_freshness(entity: str, data_source: str = "moex_iss") -> dict:
     }
 
 
+# ─── Issuer Reference ───
+
+def get_issuer_references():
+    """Все записи ручного справочника эмитентов."""
+    with get_db() as conn:
+        return conn.execute(
+            "SELECT * FROM issuer_reference ORDER BY issuer_name COLLATE NOCASE"
+        ).fetchall()
+
+
+def get_issuer_reference_map() -> dict[str, dict]:
+    """Словарь issuer_name -> запись справочника эмитентов."""
+    rows = get_issuer_references()
+    return {row["issuer_name"]: dict(row) for row in rows}
+
+
+def upsert_issuer_reference(
+    issuer_name: str,
+    issuer_group: str = "",
+    sector: str = "",
+    issuer_type: str = "",
+    comment: str = "",
+):
+    """Добавить/обновить запись справочника эмитентов."""
+    normalized_name = (issuer_name or "").strip()
+    if not normalized_name:
+        raise ValueError("issuer_name is required")
+
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO issuer_reference
+               (issuer_name, issuer_group, sector, issuer_type, comment, updated_at)
+               VALUES (?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(issuer_name) DO UPDATE SET
+                 issuer_group=excluded.issuer_group,
+                 sector=excluded.sector,
+                 issuer_type=excluded.issuer_type,
+                 comment=excluded.comment,
+                 updated_at=datetime('now')""",
+            (
+                normalized_name,
+                (issuer_group or "").strip(),
+                (sector or "").strip(),
+                (issuer_type or "").strip(),
+                (comment or "").strip(),
+            ),
+        )
+
+
+def delete_issuer_reference(issuer_name: str) -> None:
+    """Удалить запись из справочника эмитентов по issuer_name."""
+    normalized_name = (issuer_name or "").strip()
+    if not normalized_name:
+        return
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM issuer_reference WHERE issuer_name = ?",
+            (normalized_name,),
+        )
+
+
 # ─── Rebalance Targets ───
 
 def get_rebalance_targets():
@@ -826,4 +904,3 @@ def sync_cost_basis_from_trades():
             )
 
     return len(calculated)
-

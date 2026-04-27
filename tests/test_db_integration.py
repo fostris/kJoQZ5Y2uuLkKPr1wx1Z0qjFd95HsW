@@ -100,6 +100,7 @@ class DbIntegrationTests(unittest.TestCase):
             "coupon_calendar",
             "bond_maturities",
             "cost_basis",
+            "issuer_reference",
             "schema_migrations",
         }
         self.assertTrue(required_tables.issubset(tables))
@@ -205,6 +206,30 @@ class DbIntegrationTests(unittest.TestCase):
         self.assertEqual(db.DB_PATH.parent, Path(self._tmpdir.name))
         self.assertEqual(db.DB_PATH.name, "portfolio_test.db")
         self.assertNotEqual(db.DB_PATH, self._original_db_path)
+
+    def test_issuer_reference_crud(self):
+        db.upsert_issuer_reference(
+            issuer_name="Issuer A",
+            issuer_group="Group A",
+            sector="Finance",
+            issuer_type="Corporate",
+            comment="Initial",
+        )
+        db.upsert_issuer_reference(
+            issuer_name="Issuer A",
+            issuer_group="Group A2",
+            sector="Finance",
+            issuer_type="Corporate",
+            comment="Updated",
+        )
+
+        ref_map = db.get_issuer_reference_map()
+        self.assertIn("Issuer A", ref_map)
+        self.assertEqual(ref_map["Issuer A"]["issuer_group"], "Group A2")
+        self.assertEqual(ref_map["Issuer A"]["comment"], "Updated")
+
+        db.delete_issuer_reference("Issuer A")
+        self.assertNotIn("Issuer A", db.get_issuer_reference_map())
 
 
 if __name__ == "__main__":

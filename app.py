@@ -259,6 +259,7 @@ else:
     bond_isins = tuple()
 ytm_by_isin = load_bond_ytm_map(bond_isins) if bond_isins else {}
 issuer_by_isin = load_bond_issuer_map(bond_isins) if bond_isins else {}
+issuer_reference_map = db.get_issuer_reference_map()
 maturities = db.get_bond_maturities()
 coupon_calendar = db.get_coupon_calendar()
 bond_amortizations = db.get_bond_amortizations()
@@ -271,6 +272,7 @@ maturity_by_isin = {
 concentration_metrics = concentration.calculate_concentration_metrics(
     pos_list,
     issuer_by_isin=issuer_by_isin,
+    issuer_reference_by_name=issuer_reference_map,
 )
 ytm_metrics = calculate_weighted_ytm(
     positions=pos_list,
@@ -698,6 +700,156 @@ with tab_overview:
             f"Для {fallback_count} облигаций эмитент недоступен в API, использована временная fallback-группировка по названию выпуска."
         )
     st.caption(format_sync_freshness_caption("Эмитенты (MOEX)", db.get_data_sync_freshness("issuer")))
+
+    sector_rows = concentration_metrics.get("sectors", [])
+    issuer_group_rows = concentration_metrics.get("issuer_groups", [])
+
+    sg_col1, sg_col2 = st.columns(2)
+    with sg_col1:
+        st.markdown("#### Концентрация по секторам")
+        if sector_rows:
+            sector_df = pd.DataFrame(sector_rows).rename(
+                columns={
+                    "sector": "Сектор",
+                    "market_value": "Рыночная стоимость",
+                    "dimension_share": "Доля портфеля",
+                    "issuers_count": "Эмитентов",
+                }
+            )
+            sector_df["Доля портфеля"] = sector_df["Доля портфеля"].apply(
+                lambda v: v * 100 if v is not None else None
+            )
+            st.dataframe(
+                sector_df[["Сектор", "Рыночная стоимость", "Доля портфеля", "Эмитентов"]],
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Рыночная стоимость": st.column_config.NumberColumn(format="%.2f ₽"),
+                    "Доля портфеля": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Эмитентов": st.column_config.NumberColumn(format="%d"),
+                },
+            )
+        else:
+            st.info("Нет данных для расчёта секторной концентрации.")
+
+    with sg_col2:
+        st.markdown("#### Концентрация по группам эмитентов")
+        if issuer_group_rows:
+            group_df = pd.DataFrame(issuer_group_rows).rename(
+                columns={
+                    "issuer_group": "Группа эмитентов",
+                    "market_value": "Рыночная стоимость",
+                    "dimension_share": "Доля портфеля",
+                    "issuers_count": "Эмитентов",
+                }
+            )
+            group_df["Доля портфеля"] = group_df["Доля портфеля"].apply(
+                lambda v: v * 100 if v is not None else None
+            )
+            st.dataframe(
+                group_df[["Группа эмитентов", "Рыночная стоимость", "Доля портфеля", "Эмитентов"]],
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Рыночная стоимость": st.column_config.NumberColumn(format="%.2f ₽"),
+                    "Доля портфеля": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Эмитентов": st.column_config.NumberColumn(format="%d"),
+                },
+            )
+        else:
+            st.info("Нет данных для расчёта концентрации по группам эмитентов.")
+
+    st.markdown("#### 🗂 Справочник эмитентов")
+    issuer_reference_rows = db.get_issuer_references()
+    if issuer_reference_rows:
+        ref_df = pd.DataFrame([dict(row) for row in issuer_reference_rows]).rename(
+            columns={
+                "issuer_name": "Эмитент",
+                "issuer_group": "Группа",
+                "sector": "Сектор",
+                "issuer_type": "Тип эмитента",
+                "comment": "Комментарий",
+                "updated_at": "Обновлено",
+            }
+        )
+        st.dataframe(
+            ref_df[["Эмитент", "Группа", "Сектор", "Тип эмитента", "Комментарий", "Обновлено"]],
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("Справочник эмитентов пока пуст.")
+
+    with st.expander("➕ Добавить / обновить запись справочника"):
+        existing_names = sorted({
+            str(row["issuer_name"]) for row in issuer_reference_rows
+            if row["issuer_name"]
+        })
+        suggested_names = sorted({
+            str(row.get("issuer"))
+            for row in issuer_rows
+            if row.get("issuer")
+        })
+        selected_name = st.selectbox(
+            "Выбрать существующего эмитента",
+            options=[""] + existing_names,
+            format_func=lambda v: "— новая запись —" if not v else v,
+        )
+
+        selected_reference = issuer_reference_map.get(selected_name) if selected_name else None
+        issuer_name_input = st.text_input(
+            "issuer_name",
+            value=selected_name or "",
+            placeholder="Точное имя эмитента",
+        )
+        issuer_group_input = st.text_input(
+            "issuer_group",
+            value=(selected_reference or {}).get("issuer_group") or "",
+            placeholder="Например: ГК Система",
+        )
+        sector_input = st.text_input(
+            "sector",
+            value=(selected_reference or {}).get("sector") or "",
+            placeholder="Например: Финансы",
+        )
+        issuer_type_input = st.text_input(
+            "issuer_type",
+            value=(selected_reference or {}).get("issuer_type") or "",
+            placeholder="Например: Государственный / Корпоративный",
+        )
+        comment_input = st.text_area(
+            "comment",
+            value=(selected_reference or {}).get("comment") or "",
+            placeholder="Заметка по эмитенту",
+        )
+
+        if suggested_names:
+            st.caption("Подсказки из текущего портфеля: " + ", ".join(suggested_names[:12]))
+
+        if st.button("💾 Сохранить запись эмитента"):
+            if not issuer_name_input.strip():
+                st.warning("Укажите issuer_name.")
+            else:
+                db.upsert_issuer_reference(
+                    issuer_name=issuer_name_input,
+                    issuer_group=issuer_group_input,
+                    sector=sector_input,
+                    issuer_type=issuer_type_input,
+                    comment=comment_input,
+                )
+                st.success(f"✅ Справочник обновлён для «{issuer_name_input.strip()}».")
+                st.rerun()
+
+    if issuer_reference_rows:
+        with st.expander("🗑 Удалить запись из справочника"):
+            delete_target = st.selectbox(
+                "Эмитент",
+                options=sorted({str(row['issuer_name']) for row in issuer_reference_rows if row["issuer_name"]}),
+            )
+            if st.button("Удалить запись"):
+                db.delete_issuer_reference(delete_target)
+                st.success(f"✅ Запись «{delete_target}» удалена.")
+                st.rerun()
 
     st.divider()
     st.subheader("📄 Экспорт краткого HTML-отчёта")

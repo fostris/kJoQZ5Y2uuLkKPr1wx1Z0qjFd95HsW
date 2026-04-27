@@ -21,6 +21,7 @@ SEVERITY_PRIORITY = {"info": 0, "warning": 1, "high": 2, "critical": 3}
 BOND_ASSET_TYPES = ("bond_ofz_pd", "bond_ofz_in", "bond_corp")
 CORPORATE_BOND_TYPE = "bond_corp"
 UNKNOWN_ISSUER = "Unknown"
+UNKNOWN_SECTOR = "Не указан"
 
 
 def _to_float(value: Any) -> float | None:
@@ -30,6 +31,35 @@ def _to_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_text_key(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return text
+
+
+def _build_issuer_reference_lookup(
+    issuer_reference_by_name: Mapping[str, Mapping[str, Any]] | None,
+) -> dict[str, Mapping[str, Any]]:
+    if not issuer_reference_by_name:
+        return {}
+
+    lookup: dict[str, Mapping[str, Any]] = {}
+    for issuer_name, row in issuer_reference_by_name.items():
+        key = _normalize_text_key(issuer_name)
+        if not key:
+            continue
+        lookup[key] = row
+    return lookup
+
+
+def _resolve_issuer_reference(
+    issuer_name: str,
+    reference_lookup: Mapping[str, Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    if not issuer_name:
+        return None
+    return reference_lookup.get(_normalize_text_key(issuer_name))
 
 
 def calculate_position_market_value(position: Mapping[str, Any]) -> float | None:
@@ -90,9 +120,11 @@ def group_bond_positions_by_issuer(
     positions_with_share: list[Mapping[str, Any]],
     total_portfolio_value: float,
     issuer_by_isin: Mapping[str, str | None] | None = None,
+    issuer_reference_by_name: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Группировка облигаций по эмитенту и расчёт долей эмитентов."""
     issuer_by_isin = issuer_by_isin or {}
+    reference_lookup = _build_issuer_reference_lookup(issuer_reference_by_name)
 
     by_issuer_value: dict[str, float] = defaultdict(float)
     by_issuer_isins: dict[str, set[str]] = defaultdict(set)
@@ -121,11 +153,21 @@ def group_bond_positions_by_issuer(
 
     results: list[dict[str, Any]] = []
     for issuer, market_value in by_issuer_value.items():
+        ref = _resolve_issuer_reference(issuer, reference_lookup) or {}
+        issuer_group = str(ref.get("issuer_group") or "").strip() or issuer
+        sector = str(ref.get("sector") or "").strip() or UNKNOWN_SECTOR
+        issuer_type = str(ref.get("issuer_type") or "").strip()
+        comment = str(ref.get("comment") or "").strip()
+
         share = (market_value / total_portfolio_value) if total_portfolio_value > 0 else None
         issues_count = len(by_issuer_isins.get(issuer, set()))
         results.append(
             {
                 "issuer": issuer,
+                "issuer_group": issuer_group,
+                "sector": sector,
+                "issuer_type": issuer_type,
+                "comment": comment,
                 "market_value": market_value,
                 "issuer_share": share,
                 "issues_count": issues_count,
@@ -135,6 +177,42 @@ def group_bond_positions_by_issuer(
 
     results.sort(key=lambda x: x["market_value"], reverse=True)
     return results, fallback_count
+
+
+def aggregate_issuer_dimension(
+    issuer_rows: list[Mapping[str, Any]],
+    total_portfolio_value: float,
+    field_name: str,
+    fallback_label: str,
+) -> list[dict[str, Any]]:
+    """Собрать концентрацию по атрибуту эмитента (сектор/группа)."""
+    by_dimension_value: dict[str, float] = defaultdict(float)
+    by_dimension_issuers: dict[str, set[str]] = defaultdict(set)
+
+    for row in issuer_rows:
+        market_value = _to_float(row.get("market_value"))
+        if market_value is None or market_value <= 0:
+            continue
+
+        issuer = str(row.get("issuer") or UNKNOWN_ISSUER)
+        dimension_value = str(row.get(field_name) or "").strip() or fallback_label
+        by_dimension_value[dimension_value] += market_value
+        by_dimension_issuers[dimension_value].add(issuer)
+
+    results: list[dict[str, Any]] = []
+    for dimension_value, market_value in by_dimension_value.items():
+        share = (market_value / total_portfolio_value) if total_portfolio_value > 0 else None
+        results.append(
+            {
+                field_name: dimension_value,
+                "market_value": market_value,
+                "dimension_share": share,
+                "issuers_count": len(by_dimension_issuers.get(dimension_value, set())),
+            }
+        )
+
+    results.sort(key=lambda x: x["market_value"], reverse=True)
+    return results
 
 
 def build_concentration_warnings(
@@ -242,6 +320,7 @@ def build_concentration_warning_items(
 def calculate_concentration_metrics(
     positions: list[Mapping[str, Any]],
     issuer_by_isin: Mapping[str, str | None] | None = None,
+    issuer_reference_by_name: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Комплексный расчёт концентрации: доли, HHI, предупреждения."""
     position_rows, total_portfolio_value = calculate_position_shares(positions)
@@ -250,6 +329,19 @@ def calculate_concentration_metrics(
         positions_with_share=position_rows,
         total_portfolio_value=total_portfolio_value,
         issuer_by_isin=issuer_by_isin,
+        issuer_reference_by_name=issuer_reference_by_name,
+    )
+    sector_rows = aggregate_issuer_dimension(
+        issuer_rows=issuer_rows,
+        total_portfolio_value=total_portfolio_value,
+        field_name="sector",
+        fallback_label=UNKNOWN_SECTOR,
+    )
+    issuer_group_rows = aggregate_issuer_dimension(
+        issuer_rows=issuer_rows,
+        total_portfolio_value=total_portfolio_value,
+        field_name="issuer_group",
+        fallback_label=UNKNOWN_ISSUER,
     )
 
     largest_position = None
@@ -298,4 +390,6 @@ def calculate_concentration_metrics(
         "warnings": warnings,
         "warning_items": warning_items,
         "issuer_fallback_count": issuer_fallback_count,
+        "sectors": sector_rows,
+        "issuer_groups": issuer_group_rows,
     }

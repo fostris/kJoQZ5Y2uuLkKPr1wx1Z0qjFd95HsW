@@ -99,6 +99,52 @@ class ConcentrationMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["issuers"][0]["issuer"], "Bond Unknown")
         self.assertEqual(metrics["issuer_fallback_count"], 1)
 
+    def test_sector_and_issuer_group_concentration_with_reference(self):
+        positions = [
+            {"name": "Bond 1", "isin": "ISIN1", "asset_type": "bond_corp", "value_end": 100.0, "nkd_end": 0.0},
+            {"name": "Bond 2", "isin": "ISIN2", "asset_type": "bond_corp", "value_end": 100.0, "nkd_end": 0.0},
+            {"name": "Bond 3", "isin": "ISIN3", "asset_type": "bond_corp", "value_end": 200.0, "nkd_end": 0.0},
+        ]
+        issuer_by_isin = {
+            "ISIN1": "Issuer A",
+            "ISIN2": "Issuer B",
+            "ISIN3": "Issuer C",
+        }
+        issuer_reference_by_name = {
+            "Issuer A": {"issuer_group": "Group 1", "sector": "Finance"},
+            "Issuer B": {"issuer_group": "Group 1", "sector": "Finance"},
+            "Issuer C": {"issuer_group": "Group 2", "sector": "Energy"},
+        }
+
+        metrics = concentration.calculate_concentration_metrics(
+            positions,
+            issuer_by_isin=issuer_by_isin,
+            issuer_reference_by_name=issuer_reference_by_name,
+        )
+
+        sectors = {row["sector"]: row for row in metrics["sectors"]}
+        self.assertAlmostEqual(sectors["Finance"]["dimension_share"], 0.5)
+        self.assertAlmostEqual(sectors["Energy"]["dimension_share"], 0.5)
+
+        groups = {row["issuer_group"]: row for row in metrics["issuer_groups"]}
+        self.assertAlmostEqual(groups["Group 1"]["dimension_share"], 0.5)
+        self.assertAlmostEqual(groups["Group 2"]["dimension_share"], 0.5)
+
+    def test_sector_and_group_fallback_when_reference_is_missing(self):
+        positions = [
+            {"name": "Bond X", "isin": "ISINX", "asset_type": "bond_corp", "value_end": 300.0, "nkd_end": 0.0},
+        ]
+        metrics = concentration.calculate_concentration_metrics(
+            positions,
+            issuer_by_isin={"ISINX": "Issuer X"},
+            issuer_reference_by_name={},
+        )
+
+        self.assertEqual(metrics["issuers"][0]["issuer_group"], "Issuer X")
+        self.assertEqual(metrics["issuers"][0]["sector"], concentration.UNKNOWN_SECTOR)
+        self.assertEqual(metrics["issuer_groups"][0]["issuer_group"], "Issuer X")
+        self.assertEqual(metrics["sectors"][0]["sector"], concentration.UNKNOWN_SECTOR)
+
     def test_severity_levels_for_position_thresholds_5_10_15_20(self):
         items = concentration.build_concentration_warning_items(
             position_rows=[
