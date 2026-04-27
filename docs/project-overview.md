@@ -54,7 +54,8 @@
 | [formatters.py](/Users/nikita/Desktop/projects/broker-dashboard/formatters.py:1) | Форматирование рублей/процентов/null-значений для UI. |
 | [import_report.py](/Users/nikita/Desktop/projects/broker-dashboard/import_report.py:1) | CLI-импорт одного файла или директории отчётов. |
 | [fetch_gmail.py](/Users/nikita/Desktop/projects/broker-dashboard/fetch_gmail.py:1) | IMAP-загрузка отчётов из Gmail и автоимпорт в БД. |
-| [tests/](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_concentration.py:1) | Unit-тесты расчётных модулей (`concentration`, `portfolio_metrics`, `portfolio_tables`, `formatters`), MOEX-логики и SQL-обвязки свежести данных. |
+| [tests/](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_concentration.py:1) | Unit-тесты расчётных модулей (`concentration`, `portfolio_metrics`, `portfolio_tables`, `formatters`), parser-логики, MOEX-логики и SQL-обвязки свежести данных. |
+| [tests/fixtures/parser/](/Users/nikita/Desktop/projects/broker-dashboard/tests/fixtures/parser/minimal_report.html) | Синтетические HTML fixtures для тестов парсера без персональных данных. |
 | [reports/](/Users/nikita/Desktop/projects/broker-dashboard/reports) | Исходные HTML-отчёты брокера. |
 | [portfolio.db](/Users/nikita/Desktop/projects/broker-dashboard/portfolio.db) | SQLite база данных (создается/обновляется кодом). |
 | [start_streamlit.sh](/Users/nikita/Desktop/projects/broker-dashboard/start_streamlit.sh:1) | Скрипт запуска Streamlit с параметрами сервера. |
@@ -255,6 +256,7 @@ UI реализован в одном файле `app.py` как набор вк
 - [tests/test_report_export.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_report_export.py:1): генерация краткого HTML-отчёта, включая сценарии с полными и неполными данными.
 - [tests/test_data_sync_status.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_data_sync_status.py:1): SQL-обвязка `data_sync_status`, агрегация свежести и сохранение истории ошибок.
 - [tests/test_db_migrations.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_db_migrations.py:1): применение миграций на новой/старой БД и идемпотентность повторного запуска.
+- [tests/test_parser.py](/Users/nikita/Desktop/projects/broker-dashboard/tests/test_parser.py:1): базовый парсинг HTML-отчёта, включая даты, позиции/НКД, сделки, денежные потоки, пополнения и неполные таблицы.
 
 Чем запускать:
 - `python -m unittest discover -s tests -v`
@@ -263,11 +265,12 @@ UI реализован в одном файле `app.py` как набор вк
 - чистая бизнес-логика концентрации, портфельных метрик, подготовки таблиц и форматирования;
 - YTM-парсинг, retry/backoff и статусы свежести синхронизации MOEX;
 - SQL-функции свежести `data_sync_status`;
-- миграции БД (`schema_migrations`, `apply_migrations`, `get_schema_version`).
+- миграции БД (`schema_migrations`, `apply_migrations`, `get_schema_version`);
+- базовые сценарии парсинга `parser.py` на синтетических fixtures.
 
 Не покрыто (по текущему коду):
 - `app.py` (UI-ветки, визуализация, интеграционные сценарии);
-- `parser.py` (разбор реальных HTML-краевых случаев);
+- `parser.py` (расширенные/реальные HTML-краевые случаи и вариативность вёрстки);
 - большая часть `db.py` (кроме `data_sync_status`);
 - `fetch_gmail.py` и сетевые сценарии MOEX.
 

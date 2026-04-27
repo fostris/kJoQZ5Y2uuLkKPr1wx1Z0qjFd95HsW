@@ -851,20 +851,18 @@ Note (2026-04-27): added `schema_migrations` with versioned `SCHEMA_MIGRATIONS`,
 
 ## 6.4. Добавить тесты парсера
 
-Status (2026-04-27): in progress.
-
 Что сделать:
 
-- [ ] Создать `tests/test_parser.py`.
-- [ ] Добавить минимальный HTML-fixture.
-- [ ] Проверить:
+- [x] Создать `tests/test_parser.py`.
+- [x] Добавить минимальный HTML-fixture.
+- [x] Проверить:
   - позиции;
   - НКД;
   - сделки;
   - денежные потоки;
   - даты отчёта;
   - пустые значения.
-- [ ] Не использовать реальные персональные данные в fixtures.
+- [x] Не использовать реальные персональные данные в fixtures.
 
 Сложность: средняя  
 Ценность: высокая  
@@ -872,13 +870,17 @@ Status (2026-04-27): in progress.
 
 Критерии готовности:
 
-- [ ] Парсер покрыт базовыми тестами.
-- [ ] Есть тест на пустую/неполную таблицу.
-- [ ] Нет персональных данных в тестах.
+- [x] Парсер покрыт базовыми тестами.
+- [x] Есть тест на пустую/неполную таблицу.
+- [x] Нет персональных данных в тестах.
+
+Note (2026-04-27): added parser fixtures with synthetic data (`minimal_report.html`, `incomplete_report.html`) and `tests/test_parser.py` covering report dates, positions, NKD empty values, trades, cash flows, deposits, and incomplete-table handling.
 
 ---
 
 ## 6.5. Добавить тесты БД
+
+Status (2026-04-27): in progress.
 
 Что сделать:
 
@@ -1223,7 +1225,7 @@ Status (2026-04-27): in progress.
 - [x] 6.1 Retry/backoff для MOEX API.
 - [x] 6.2 Timestamp свежести данных.
 - [x] 6.3 Миграции БД.
-- [ ] 6.4 Тесты парсера.
+- [x] 6.4 Тесты парсера.
 - [ ] 6.5 Тесты БД.
 
 ## Sprint 5 — справочники и риск

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>Broker Test Report</title>
+</head>
+<body>
+  <h3>Отчет с 01.01.2026 по 31.01.2026, дата создания 01.02.2026</h3>
+  <p>Инвестор: TEST INVESTOR Договор брокерского обслуживания ABC123 от 01.01.2026</p>
+
+  <table class="RatingAssets">
+    <tr class="table-header">
+      <td>Категория</td><td>ЦБ нач.</td><td>ДС нач.</td><td>Итого нач.</td>
+      <td>ЦБ кон.</td><td>ДС кон.</td><td>Итого кон.</td><td>X</td><td>Y</td><td>Изм.</td>
+    </tr>
+    <tr>
+      <td>Все активы</td><td>100000</td><td>5000</td><td>105000</td>
+      <td>120000</td><td>7000</td><td>127000</td><td>0</td><td>0</td><td></td>
+    </tr>
+  </table>
+
+  <table>
+    <tr class="table-header">
+      <td>#</td><td>Код</td><td>ISIN</td><td>Эмитент</td><td>Тип</td><td>Выпуск</td>
+    </tr>
+    <tr>
+      <td>1</td><td>TSTBOND</td><td>RU000TEST01</td><td>Test Issuer</td><td>Корпоративная облигация</td><td>001P</td>
+    </tr>
+  </table>
+
+  <table>
+    <tr class="table-header">
+      <td>Основной рынок · Начало периода · Конец периода</td>
+    </tr>
+    <tr>
+      <td>Test Bond 01</td>
+      <td>RU000TEST01</td>
+      <td>RUB</td>
+      <td>10</td>
+      <td>1000</td>
+      <td>99.1</td>
+      <td>9910</td>
+      <td></td>
+      <td>12</td>
+      <td>1000</td>
+      <td>101.2</td>
+      <td>12144</td>
+      <td></td>
+      <td>2</td>
+      <td>2234</td>
+    </tr>
+  </table>
+
+  <table>
+    <tr class="table-header">
+      <td>Дата</td><td>#</td><td>Описание операции</td><td>Валюта</td><td>Сумма зачисления</td><td>Сумма списания</td>
+    </tr>
+    <tr>
+      <td>05.01.2026</td><td>1</td><td>Купон</td><td>RUB</td><td>320.50</td><td></td>
+    </tr>
+  </table>
+
+  <table>
+    <tr class="table-header">
+      <td>Дата заключения</td><td>Дата расчетов</td><td>Время</td><td>Наименование ЦБ</td>
+      <td>Тикер</td><td>Валюта</td><td>Операция</td><td>Кол-во</td>
+      <td>Цена</td><td>Сумма</td><td>НКД</td><td>Комиссия брокера</td>
+      <td>Комиссия биржи</td><td>ID</td><td>Прочее</td><td>Статус</td>
+    </tr>
+    <tr>
+      <td>06.01.2026</td><td>08.01.2026</td><td>10:05:00</td><td>Test Bond 01</td>
+      <td>TSTBOND</td><td>RUB</td><td>Покупка</td><td>2</td>
+      <td>1000</td><td>2000</td><td></td><td>1.10</td>
+      <td>0.20</td><td>TR-001</td><td>—</td><td>Исполнена</td>
+    </tr>
+  </table>
+
+  <table>
+    <tr class="table-header">
+      <td>Лимит</td><td>Дата операции</td><td>Основание операции</td>
+    </tr>
+    <tr><td colspan="4">ИИС</td></tr>
+    <tr><td>2026</td><td></td><td>10.01.2026</td><td>40000</td></tr>
+    <tr><td colspan="4">ИИС3</td></tr>
+    <tr><td>2026</td><td></td><td>20.01.2026</td><td>50000</td></tr>
+  </table>
+</body>
+</html>
