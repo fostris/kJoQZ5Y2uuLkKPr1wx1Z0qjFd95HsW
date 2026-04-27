@@ -518,8 +518,23 @@ with tab_overview:
     with rc5:
         st.metric("HHI эмитенты", f"{issuer_hhi:.3f}" if issuer_hhi is not None else "—")
 
+    risk_warning_items = concentration_metrics.get("warning_items", [])
     risk_warnings = concentration_metrics.get("warnings", [])
-    if risk_warnings:
+    if risk_warning_items:
+        for warning_item in risk_warning_items:
+            severity = warning_item.get("severity", "warning")
+            warning_text = str(warning_item.get("text") or "")
+            if not warning_text:
+                continue
+            if severity == "critical":
+                st.error(f"🛑 [critical] {warning_text}")
+            elif severity == "high":
+                st.warning(f"🔴 [high] {warning_text}")
+            elif severity == "warning":
+                st.warning(f"⚠️ [warning] {warning_text}")
+            else:
+                st.info(f"ℹ️ [info] {warning_text}")
+    elif risk_warnings:
         for warning_text in risk_warnings:
             st.warning(f"⚠️ {warning_text}")
     else:

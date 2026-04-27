@@ -99,6 +99,65 @@ class ConcentrationMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["issuers"][0]["issuer"], "Bond Unknown")
         self.assertEqual(metrics["issuer_fallback_count"], 1)
 
+    def test_severity_levels_for_position_thresholds_5_10_15_20(self):
+        items = concentration.build_concentration_warning_items(
+            position_rows=[
+                {"name": "P5", "position_share": 0.05},
+                {"name": "P10", "position_share": 0.10},
+                {"name": "P15", "position_share": 0.15},
+                {"name": "P20", "position_share": 0.20},
+            ],
+            issuer_rows=[],
+            corporate_bonds_share=None,
+            position_hhi=None,
+            issuer_hhi=None,
+        )
+
+        by_name = {}
+        for item in items:
+            text = item["text"]
+            if "P5" in text:
+                by_name["P5"] = item["severity"]
+            if "P10" in text:
+                by_name["P10"] = item["severity"]
+            if "P15" in text:
+                by_name["P15"] = item["severity"]
+            if "P20" in text:
+                by_name["P20"] = item["severity"]
+
+        self.assertEqual(by_name["P5"], "info")
+        self.assertEqual(by_name["P10"], "warning")
+        self.assertEqual(by_name["P15"], "high")
+        self.assertEqual(by_name["P20"], "critical")
+
+    def test_warning_items_sorted_by_severity(self):
+        items = concentration.build_concentration_warning_items(
+            position_rows=[
+                {"name": "P15", "position_share": 0.15},
+                {"name": "P5", "position_share": 0.05},
+                {"name": "P20", "position_share": 0.20},
+            ],
+            issuer_rows=[],
+            corporate_bonds_share=None,
+            position_hhi=None,
+            issuer_hhi=None,
+        )
+
+        severities = [item["severity"] for item in items]
+        self.assertEqual(severities, ["critical", "high", "info"])
+
+    def test_metrics_expose_warning_items(self):
+        positions = [
+            {"name": "Big", "isin": "I1", "asset_type": "stock", "value_end": 95.0, "nkd_end": 0.0},
+            {"name": "Small", "isin": "I2", "asset_type": "stock", "value_end": 5.0, "nkd_end": 0.0},
+        ]
+
+        metrics = concentration.calculate_concentration_metrics(positions)
+
+        self.assertTrue(metrics["warning_items"])
+        self.assertIn("severity", metrics["warning_items"][0])
+        self.assertIn("text", metrics["warning_items"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

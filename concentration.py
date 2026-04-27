@@ -10,6 +10,13 @@ MAX_ISSUER_SHARE = 0.10
 MAX_CORPORATE_BONDS_SHARE = 0.70
 MAX_ISSUER_HHI = 0.18
 MAX_POSITION_HHI = 0.18
+CONCENTRATION_SEVERITY_THRESHOLDS = (
+    (0.20, "critical"),
+    (0.15, "high"),
+    (0.10, "warning"),
+    (0.05, "info"),
+)
+SEVERITY_PRIORITY = {"info": 0, "warning": 1, "high": 2, "critical": 3}
 
 BOND_ASSET_TYPES = ("bond_ofz_pd", "bond_ofz_in", "bond_corp")
 CORPORATE_BOND_TYPE = "bond_corp"
@@ -131,39 +138,103 @@ def group_bond_positions_by_issuer(
 
 
 def build_concentration_warnings(
+    warning_items: list[Mapping[str, Any]],
+) -> list[str]:
+    """Совместимый плоский список текстов предупреждений."""
+    return [str(item.get("text")) for item in warning_items if item.get("text")]
+
+
+def _classify_share_severity(share: float | None) -> str | None:
+    if share is None:
+        return None
+    for threshold, severity in CONCENTRATION_SEVERITY_THRESHOLDS:
+        if share >= threshold:
+            return severity
+    return None
+
+
+def build_concentration_warning_items(
     position_rows: list[Mapping[str, Any]],
     issuer_rows: list[Mapping[str, Any]],
     corporate_bonds_share: float | None,
     position_hhi: float | None,
     issuer_hhi: float | None,
-) -> list[str]:
-    """Текстовые предупреждения при превышении лимитов."""
-    warnings: list[str] = []
+) -> list[dict[str, Any]]:
+    """Структурированные предупреждения концентрации с severity."""
+    warnings: list[dict[str, Any]] = []
 
     for row in position_rows:
         share = _to_float(row.get("position_share"))
-        if share is not None and share > MAX_POSITION_SHARE:
+        severity = _classify_share_severity(share)
+        if share is not None and severity is not None:
             warnings.append(
-                f"Позиция '{row.get('name', 'Unknown')}' занимает {share * 100:.1f}% портфеля (> {MAX_POSITION_SHARE * 100:.0f}%)."
+                {
+                    "kind": "position_share",
+                    "severity": severity,
+                    "share": share,
+                    "text": (
+                        f"Позиция '{row.get('name', 'Unknown')}' занимает "
+                        f"{share * 100:.1f}% портфеля."
+                    ),
+                }
             )
 
     for row in issuer_rows:
         share = _to_float(row.get("issuer_share"))
-        if share is not None and share > MAX_ISSUER_SHARE:
+        severity = _classify_share_severity(share)
+        if share is not None and severity is not None:
             warnings.append(
-                f"Эмитент '{row.get('issuer', UNKNOWN_ISSUER)}' занимает {share * 100:.1f}% портфеля (> {MAX_ISSUER_SHARE * 100:.0f}%)."
+                {
+                    "kind": "issuer_share",
+                    "severity": severity,
+                    "share": share,
+                    "text": (
+                        f"Эмитент '{row.get('issuer', UNKNOWN_ISSUER)}' занимает "
+                        f"{share * 100:.1f}% портфеля."
+                    ),
+                }
             )
 
     if corporate_bonds_share is not None and corporate_bonds_share > MAX_CORPORATE_BONDS_SHARE:
         warnings.append(
-            f"Доля корпоративных облигаций {corporate_bonds_share * 100:.1f}% (> {MAX_CORPORATE_BONDS_SHARE * 100:.0f}%)."
+            {
+                "kind": "corporate_bonds_share",
+                "severity": "warning",
+                "share": corporate_bonds_share,
+                "text": (
+                    f"Доля корпоративных облигаций {corporate_bonds_share * 100:.1f}% "
+                    f"(> {MAX_CORPORATE_BONDS_SHARE * 100:.0f}%)."
+                ),
+            }
         )
 
     if issuer_hhi is not None and issuer_hhi > MAX_ISSUER_HHI:
-        warnings.append(f"HHI по эмитентам {issuer_hhi:.3f} (> {MAX_ISSUER_HHI:.2f}).")
+        warnings.append(
+            {
+                "kind": "issuer_hhi",
+                "severity": "warning",
+                "hhi": issuer_hhi,
+                "text": f"HHI по эмитентам {issuer_hhi:.3f} (> {MAX_ISSUER_HHI:.2f}).",
+            }
+        )
 
     if position_hhi is not None and position_hhi > MAX_POSITION_HHI:
-        warnings.append(f"HHI по позициям {position_hhi:.3f} (> {MAX_POSITION_HHI:.2f}).")
+        warnings.append(
+            {
+                "kind": "position_hhi",
+                "severity": "warning",
+                "hhi": position_hhi,
+                "text": f"HHI по позициям {position_hhi:.3f} (> {MAX_POSITION_HHI:.2f}).",
+            }
+        )
+
+    warnings.sort(
+        key=lambda item: (
+            SEVERITY_PRIORITY.get(str(item.get("severity", "info")), 0),
+            _to_float(item.get("share")) or 0.0,
+        ),
+        reverse=True,
+    )
 
     return warnings
 
@@ -204,13 +275,14 @@ def calculate_concentration_metrics(
     position_hhi = compute_hhi([_to_float(r.get("position_share")) for r in position_rows])
     issuer_hhi = compute_hhi([_to_float(r.get("issuer_share")) for r in issuer_rows])
 
-    warnings = build_concentration_warnings(
+    warning_items = build_concentration_warning_items(
         position_rows=position_rows,
         issuer_rows=issuer_rows,
         corporate_bonds_share=corporate_bonds_share,
         position_hhi=position_hhi,
         issuer_hhi=issuer_hhi,
     )
+    warnings = build_concentration_warnings(warning_items)
 
     return {
         "positions": position_rows,
@@ -224,5 +296,6 @@ def calculate_concentration_metrics(
         "position_hhi": position_hhi,
         "issuer_hhi": issuer_hhi,
         "warnings": warnings,
+        "warning_items": warning_items,
         "issuer_fallback_count": issuer_fallback_count,
     }
