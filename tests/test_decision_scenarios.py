@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from analytics.decision_scenarios import build_buy_candidates
+from analytics.decision_scenarios import build_buy_candidates, build_reduce_candidates
 
 
 class BuyScenarioTests(unittest.TestCase):
@@ -109,6 +109,53 @@ class BuyScenarioTests(unittest.TestCase):
         self.assertIn("YTM нет", result["candidates"][0]["explanation"])
 
 
+class ReduceScenarioTests(unittest.TestCase):
+    def test_reduce_candidates_include_reasons_and_sorted_by_score(self):
+        positions = [
+            {"name": "Bond Risky", "isin": "RISK1", "asset_type": "bond_corp", "value_end": 200.0, "nkd_end": 0.0},
+            {"name": "Bond Safer", "isin": "SAFE1", "asset_type": "bond_corp", "value_end": 100.0, "nkd_end": 0.0},
+        ]
+
+        result = build_reduce_candidates(
+            positions=positions,
+            issuer_by_isin={"RISK1": "Issuer X", "SAFE1": "Issuer Y"},
+            ytm_by_isin={"SAFE1": 13.0},
+            maturity_by_isin={"SAFE1": "2028-01-01"},
+            rating_by_isin={"SAFE1": "AA(RU)"},
+            position_share_map={"RISK1": 0.20, "SAFE1": 0.05},
+            issuer_share_map={"Issuer X": 0.25, "Issuer Y": 0.05},
+            data_quality_issue_isins={"RISK1"},
+            bond_asset_types=("bond_corp", "bond_ofz_pd", "bond_ofz_in"),
+            as_of_date=date(2026, 4, 28),
+        )
+
+        candidates = result["candidates"]
+        self.assertGreaterEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["name"], "Bond Risky")
+        self.assertGreater(candidates[0]["risk_score"], candidates[-1]["risk_score"])
+        self.assertIn("нет YTM", candidates[0]["reason"])
+        self.assertIn("нет даты погашения", candidates[0]["reason"])
+
+    def test_reduce_factor_can_be_disabled(self):
+        positions = [
+            {"name": "Bond No YTM", "isin": "RISK2", "asset_type": "bond_corp", "value_end": 100.0, "nkd_end": 0.0},
+        ]
+        result = build_reduce_candidates(
+            positions=positions,
+            issuer_by_isin={"RISK2": "Issuer Z"},
+            ytm_by_isin={},
+            maturity_by_isin={"RISK2": "2028-01-01"},
+            rating_by_isin={"RISK2": "AA(RU)"},
+            position_share_map={"RISK2": 0.0},
+            issuer_share_map={"Issuer Z": 0.0},
+            data_quality_issue_isins=set(),
+            bond_asset_types=("bond_corp", "bond_ofz_pd", "bond_ofz_in"),
+            factor_enabled={"missing_ytm": False},
+            as_of_date=date(2026, 4, 28),
+        )
+
+        self.assertEqual(result["candidates"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
-

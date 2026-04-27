@@ -7,6 +7,7 @@ from typing import Any, Iterable, Mapping
 
 import concentration
 from analytics.bonds import calculate_years_to_maturity
+from analytics.ratings import RATING_BUCKET_UNRATED, classify_rating_bucket
 
 DEFAULT_WARNING_SHARE_THRESHOLD = 0.10
 
@@ -20,6 +21,33 @@ EXCLUSION_REASON_LABELS = {
     "missing_maturity": "нет даты погашения (исключено фильтром)",
     "maturity_too_long": "срок до погашения выше максимального",
 }
+
+REDUCE_FACTOR_LABELS = {
+    "position_share": "большая доля позиции",
+    "issuer_share": "большая доля эмитента",
+    "missing_ytm": "нет YTM",
+    "missing_maturity": "нет даты погашения",
+    "low_ytm_vs_term": "низкая YTM относительно срока",
+    "missing_rating": "нет рейтинга",
+    "long_maturity": "длинный срок до погашения",
+    "data_quality": "проблемы качества данных",
+}
+DEFAULT_REDUCE_FACTOR_WEIGHTS = {
+    "position_share": 25.0,
+    "issuer_share": 20.0,
+    "missing_ytm": 12.0,
+    "missing_maturity": 12.0,
+    "low_ytm_vs_term": 10.0,
+    "missing_rating": 8.0,
+    "long_maturity": 8.0,
+    "data_quality": 5.0,
+}
+DEFAULT_REDUCE_FACTOR_ENABLED = {name: True for name in REDUCE_FACTOR_LABELS}
+DEFAULT_POSITION_SHARE_REFERENCE = 0.10
+DEFAULT_ISSUER_SHARE_REFERENCE = 0.10
+DEFAULT_LONG_MATURITY_YEARS = 7.0
+DEFAULT_LOW_YTM_BASE = 6.0
+DEFAULT_LOW_YTM_YEAR_SLOPE = 0.5
 
 
 def get_exclusion_reason_label(reason_code: str) -> str:
@@ -37,6 +65,22 @@ def _to_float(value: Any) -> float | None:
 
 def _append_reason(counter: dict[str, int], reason_code: str) -> None:
     counter[reason_code] = counter.get(reason_code, 0) + 1
+
+
+def _normalized_share_risk(share: float | None, reference: float) -> float:
+    if share is None or share <= 0 or reference <= 0:
+        return 0.0
+    return min(share / reference, 1.0)
+
+
+def _risk_severity(score: float) -> str:
+    if score >= 70:
+        return "critical"
+    if score >= 45:
+        return "high"
+    if score >= 25:
+        return "warning"
+    return "info"
 
 
 def _build_candidate_explanation(
@@ -251,4 +295,193 @@ def build_buy_candidates(
         "excluded_summary": excluded_summary,
         "total_positions_seen": len(positions),
         "total_bond_positions": total_bond_positions,
+    }
+
+
+def build_reduce_candidates(
+    positions: Iterable[Mapping[str, Any]],
+    *,
+    issuer_by_isin: Mapping[str, str | None],
+    ytm_by_isin: Mapping[str, float | None],
+    maturity_by_isin: Mapping[str, str | None],
+    rating_by_isin: Mapping[str, str | None],
+    position_share_map: Mapping[str, float | None],
+    issuer_share_map: Mapping[str, float | None],
+    data_quality_issue_isins: set[str] | None,
+    bond_asset_types: tuple[str, ...],
+    factor_enabled: Mapping[str, bool] | None = None,
+    factor_weights: Mapping[str, float] | None = None,
+    position_share_reference: float = DEFAULT_POSITION_SHARE_REFERENCE,
+    issuer_share_reference: float = DEFAULT_ISSUER_SHARE_REFERENCE,
+    long_maturity_years: float = DEFAULT_LONG_MATURITY_YEARS,
+    low_ytm_base: float = DEFAULT_LOW_YTM_BASE,
+    low_ytm_year_slope: float = DEFAULT_LOW_YTM_YEAR_SLOPE,
+    as_of_date: date | None = None,
+    max_candidates: int = 15,
+) -> dict[str, Any]:
+    """Сформировать список позиций-кандидатов на сокращение по прозрачному risk_score."""
+    positions = list(positions)
+    as_of = as_of_date or date.today()
+    issue_isins = {str(isin).upper() for isin in (data_quality_issue_isins or set()) if isin}
+    enabled = dict(DEFAULT_REDUCE_FACTOR_ENABLED)
+    enabled.update({k: bool(v) for k, v in (factor_enabled or {}).items()})
+    weights = dict(DEFAULT_REDUCE_FACTOR_WEIGHTS)
+    for key, value in (factor_weights or {}).items():
+        num = _to_float(value)
+        if num is not None and num >= 0:
+            weights[key] = num
+
+    total_portfolio_value = 0.0
+    market_value_map: dict[str, float] = {}
+    for row in positions:
+        market_value = concentration.calculate_position_market_value(row)
+        if market_value is None or market_value <= 0:
+            continue
+        key = str(row.get("isin") or row.get("name") or "")
+        if key:
+            market_value_map[key] = market_value
+        total_portfolio_value += market_value
+
+    candidates: list[dict[str, Any]] = []
+    for row in positions:
+        market_value = concentration.calculate_position_market_value(row)
+        if market_value is None or market_value <= 0:
+            continue
+
+        asset_type = str(row.get("asset_type") or "")
+        is_bond = asset_type in bond_asset_types
+        isin = str(row.get("isin") or "").strip().upper()
+        name = str(row.get("name") or isin or concentration.UNKNOWN_ISSUER)
+        issuer = str(issuer_by_isin.get(isin) or name) if is_bond else str(row.get("name") or name)
+        ytm = _to_float(ytm_by_isin.get(isin)) if is_bond and isin else None
+        years_to_maturity = (
+            calculate_years_to_maturity(maturity_by_isin.get(isin), as_of)
+            if is_bond and isin
+            else None
+        )
+        rating = str(rating_by_isin.get(isin) or "") if is_bond and isin else ""
+        has_rating = bool(rating) and classify_rating_bucket(rating) != RATING_BUCKET_UNRATED
+
+        position_key = isin or name
+        position_share = _to_float(position_share_map.get(position_key))
+        if position_share is None and total_portfolio_value > 0:
+            position_share = market_value / total_portfolio_value
+        issuer_share = _to_float(issuer_share_map.get(issuer)) if issuer else None
+
+        factor_items: list[dict[str, Any]] = []
+
+        def add_factor(code: str, raw_value: float, details: str) -> None:
+            if not enabled.get(code, True):
+                return
+            if raw_value <= 0:
+                return
+            weight = float(weights.get(code, 0.0))
+            points = raw_value * weight
+            if points <= 0:
+                return
+            factor_items.append(
+                {
+                    "code": code,
+                    "label": REDUCE_FACTOR_LABELS.get(code, code),
+                    "raw_value": raw_value,
+                    "weight": weight,
+                    "points": points,
+                    "details": details,
+                }
+            )
+
+        pos_raw = _normalized_share_risk(position_share, position_share_reference)
+        add_factor(
+            "position_share",
+            pos_raw,
+            (
+                f"доля позиции {position_share * 100:.2f}% "
+                f"при ориентире {position_share_reference * 100:.2f}%"
+            ) if position_share is not None else "доля позиции недоступна",
+        )
+        iss_raw = _normalized_share_risk(issuer_share, issuer_share_reference)
+        add_factor(
+            "issuer_share",
+            iss_raw,
+            (
+                f"доля эмитента {issuer_share * 100:.2f}% "
+                f"при ориентире {issuer_share_reference * 100:.2f}%"
+            ) if issuer_share is not None else "доля эмитента недоступна",
+        )
+
+        if is_bond:
+            add_factor("missing_ytm", 1.0 if ytm is None else 0.0, "нет YTM")
+            add_factor(
+                "missing_maturity",
+                1.0 if years_to_maturity is None else 0.0,
+                "нет даты погашения",
+            )
+
+            if ytm is not None and years_to_maturity is not None:
+                required_ytm = low_ytm_base + max(years_to_maturity - 1.0, 0.0) * low_ytm_year_slope
+                low_ytm_raw = max(required_ytm - ytm, 0.0) / required_ytm if required_ytm > 0 else 0.0
+                add_factor(
+                    "low_ytm_vs_term",
+                    low_ytm_raw,
+                    f"YTM {ytm:.2f}% ниже условного порога {required_ytm:.2f}% для срока {years_to_maturity:.2f} г.",
+                )
+            if years_to_maturity is not None and long_maturity_years > 0:
+                long_raw = min(max(years_to_maturity - long_maturity_years, 0.0) / long_maturity_years, 1.0)
+                add_factor(
+                    "long_maturity",
+                    long_raw,
+                    f"срок до погашения {years_to_maturity:.2f} г. (ориентир {long_maturity_years:.2f} г.)",
+                )
+
+            add_factor(
+                "missing_rating",
+                1.0 if not has_rating else 0.0,
+                "нет рейтинга по ISIN" if isin else "нет ISIN для проверки рейтинга",
+            )
+
+        if isin and isin in issue_isins:
+            add_factor("data_quality", 1.0, "есть проблемы качества данных")
+
+        if not factor_items:
+            continue
+
+        factor_items.sort(key=lambda item: float(item["points"]), reverse=True)
+        risk_score = sum(float(item["points"]) for item in factor_items)
+        reasons = [f"{item['label']}: {item['details']}" for item in factor_items]
+
+        candidates.append(
+            {
+                "name": name,
+                "isin": isin or "—",
+                "asset_type": asset_type,
+                "issuer": issuer or "—",
+                "market_value": market_value,
+                "position_share": position_share,
+                "issuer_share": issuer_share,
+                "ytm": ytm,
+                "years_to_maturity": years_to_maturity,
+                "rating": rating or "",
+                "risk_score": risk_score,
+                "severity": _risk_severity(risk_score),
+                "factor_count": len(factor_items),
+                "factors": factor_items,
+                "reason": "; ".join(reasons),
+                "suggested_action": "можно рассмотреть частичное снижение позиции",
+            }
+        )
+
+    candidates.sort(
+        key=lambda row: (
+            -float(row.get("risk_score") or 0.0),
+            -(_to_float(row.get("position_share")) or 0.0),
+            -(_to_float(row.get("issuer_share")) or 0.0),
+            -(_to_float(row.get("market_value")) or 0.0),
+            str(row.get("name") or "").lower(),
+        )
+    )
+
+    return {
+        "candidates": candidates[:max_candidates],
+        "enabled_factors": enabled,
+        "weights": weights,
     }

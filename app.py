@@ -13,7 +13,12 @@ from pathlib import Path
 from analytics.bonds import calculate_weighted_ytm, calculate_weighted_years_to_maturity
 from analytics.cashflows import build_coupon_cashflow_by_month, build_maturity_ladder
 from analytics.data_quality import build_attention_list, build_bond_data_quality_report
-from analytics.decision_scenarios import build_buy_candidates, get_exclusion_reason_label
+from analytics.decision_scenarios import (
+    REDUCE_FACTOR_LABELS,
+    build_buy_candidates,
+    build_reduce_candidates,
+    get_exclusion_reason_label,
+)
 from analytics.ratings import (
     RATING_BUCKETS,
     RATING_BUCKET_UNRATED,
@@ -2676,6 +2681,157 @@ with tab_rebalance:
                 hide_index=True,
                 use_container_width=True,
                 column_config={"Количество": st.column_config.NumberColumn(format="%d")},
+            )
+
+        st.divider()
+        st.markdown("### 🔻 Сценарий: что снизить (risk score)")
+        st.caption(
+            "Risk score использует прозрачные правила и нужен только для приоритизации проверки позиций. "
+            "Это не обещание результата и не автоматическое действие."
+        )
+
+        rs_col1, rs_col2, rs_col3 = st.columns(3)
+        with rs_col1:
+            reduce_position_share_ref = st.number_input(
+                "Ориентир доли позиции, %",
+                min_value=1.0,
+                max_value=100.0,
+                value=10.0,
+                step=0.5,
+                key="reduce_position_share_ref",
+            )
+            reduce_issuer_share_ref = st.number_input(
+                "Ориентир доли эмитента, %",
+                min_value=1.0,
+                max_value=100.0,
+                value=10.0,
+                step=0.5,
+                key="reduce_issuer_share_ref",
+            )
+        with rs_col2:
+            reduce_long_maturity_years = st.number_input(
+                "Порог длинного срока, лет",
+                min_value=1.0,
+                max_value=50.0,
+                value=7.0,
+                step=0.5,
+                key="reduce_long_maturity_years",
+            )
+            reduce_low_ytm_base = st.number_input(
+                "Базовый порог YTM, %",
+                min_value=0.0,
+                max_value=30.0,
+                value=6.0,
+                step=0.1,
+                key="reduce_low_ytm_base",
+            )
+        with rs_col3:
+            reduce_low_ytm_slope = st.number_input(
+                "Надбавка YTM за каждый год срока, %",
+                min_value=0.0,
+                max_value=5.0,
+                value=0.5,
+                step=0.1,
+                key="reduce_low_ytm_slope",
+            )
+
+        st.caption("Факторы score (можно отключить):")
+        factor_toggle_cols = st.columns(4)
+        factor_enabled = {}
+        for idx, (factor_code, factor_label) in enumerate(REDUCE_FACTOR_LABELS.items()):
+            with factor_toggle_cols[idx % 4]:
+                factor_enabled[factor_code] = st.checkbox(
+                    factor_label,
+                    value=True,
+                    key=f"reduce_factor_{factor_code}",
+                )
+
+        reduce_scenario = build_reduce_candidates(
+            positions=pos_list,
+            issuer_by_isin=issuer_by_isin,
+            ytm_by_isin=ytm_by_isin,
+            maturity_by_isin=maturity_by_isin,
+            rating_by_isin=rating_by_isin,
+            position_share_map=position_share_map,
+            issuer_share_map=issuer_share_map,
+            data_quality_issue_isins=data_quality_issue_isins,
+            bond_asset_types=BOND_ASSET_TYPES,
+            factor_enabled=factor_enabled,
+            position_share_reference=float(reduce_position_share_ref) / 100.0,
+            issuer_share_reference=float(reduce_issuer_share_ref) / 100.0,
+            long_maturity_years=float(reduce_long_maturity_years),
+            low_ytm_base=float(reduce_low_ytm_base),
+            low_ytm_year_slope=float(reduce_low_ytm_slope),
+            as_of_date=date.today(),
+            max_candidates=15,
+        )
+
+        reduce_candidates = reduce_scenario.get("candidates", [])
+        if reduce_candidates:
+            reduce_df = pd.DataFrame(reduce_candidates).copy()
+            reduce_df["Тип"] = reduce_df["asset_type"].map(TYPE_LABELS).fillna(reduce_df["asset_type"])
+            reduce_df["YTM"] = reduce_df["ytm"].apply(
+                lambda value: f"{value:.2f}%" if value is not None else "нет данных"
+            )
+            reduce_df["Лет до погашения"] = reduce_df["years_to_maturity"].apply(
+                lambda value: f"{value:.2f}" if value is not None else "нет данных"
+            )
+            reduce_df["Доля позиции %"] = reduce_df["position_share"].apply(
+                lambda value: value * 100 if value is not None else None
+            )
+            reduce_df["Доля эмитента %"] = reduce_df["issuer_share"].apply(
+                lambda value: value * 100 if value is not None else None
+            )
+            reduce_df["Рейтинг"] = reduce_df["rating"].apply(lambda value: value if value else "без рейтинга")
+            reduce_df["Risk score"] = reduce_df["risk_score"]
+            reduce_df["Вклад факторов"] = reduce_df["factors"].apply(
+                lambda factors: "; ".join(
+                    f"{item['label']} ({float(item['points']):.1f})"
+                    for item in factors[:4]
+                )
+            )
+            reduce_df = reduce_df.rename(
+                columns={
+                    "name": "Инструмент",
+                    "isin": "ISIN",
+                    "issuer": "Эмитент",
+                    "severity": "Severity",
+                    "reason": "Причины",
+                    "suggested_action": "Что сделать",
+                }
+            )
+
+            st.dataframe(
+                reduce_df[
+                    [
+                        "Инструмент",
+                        "ISIN",
+                        "Тип",
+                        "Эмитент",
+                        "Risk score",
+                        "Severity",
+                        "Доля позиции %",
+                        "Доля эмитента %",
+                        "YTM",
+                        "Лет до погашения",
+                        "Рейтинг",
+                        "Вклад факторов",
+                        "Причины",
+                        "Что сделать",
+                    ]
+                ],
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Risk score": st.column_config.NumberColumn(format="%.2f"),
+                    "Доля позиции %": st.column_config.NumberColumn(format="%.2f%%"),
+                    "Доля эмитента %": st.column_config.NumberColumn(format="%.2f%%"),
+                },
+            )
+        else:
+            st.info(
+                "Кандидаты на сокращение не найдены по активным факторам. "
+                "Измените параметры или включите дополнительные факторы."
             )
 
         # Конкретные позиции для ребалансировки (по самым крупным отклонениям)
