@@ -12,6 +12,7 @@ from pathlib import Path
 
 from analytics.bonds import calculate_weighted_ytm, calculate_weighted_years_to_maturity
 from analytics.cashflows import build_coupon_cashflow_by_month, build_maturity_ladder
+from analytics.data_quality import build_bond_data_quality_report
 import concentration
 import db
 import moex_api
@@ -218,6 +219,9 @@ else:
 ytm_by_isin = load_bond_ytm_map(bond_isins) if bond_isins else {}
 issuer_by_isin = load_bond_issuer_map(bond_isins) if bond_isins else {}
 maturities = db.get_bond_maturities()
+coupon_calendar = db.get_coupon_calendar()
+bond_amortizations = db.get_bond_amortizations()
+cost_basis_all = db.get_cost_basis_map()
 maturity_by_isin = {
     row["isin"]: row["maturity_date"]
     for row in maturities
@@ -236,6 +240,16 @@ maturity_metrics = calculate_weighted_years_to_maturity(
     positions=pos_list,
     maturity_by_isin=maturity_by_isin,
     as_of_date=date.today(),
+    bond_asset_types=BOND_ASSET_TYPES,
+)
+data_quality_report = build_bond_data_quality_report(
+    positions=pos_list,
+    ytm_map=ytm_by_isin,
+    issuer_map=issuer_by_isin,
+    maturities=[dict(row) for row in maturities],
+    coupons=[dict(row) for row in coupon_calendar],
+    cost_basis=cost_basis_all,
+    amortizations=[dict(row) for row in bond_amortizations],
     bond_asset_types=BOND_ASSET_TYPES,
 )
 
@@ -365,6 +379,110 @@ with tab_overview:
         )
     else:
         st.caption("Для расчёта срока до погашения: нет данных.")
+
+    st.divider()
+    st.subheader("🧪 Качество данных облигаций")
+
+    quality_bond_count = data_quality_report.get("bond_count", 0)
+    quality_score = data_quality_report.get("overall_score_pct")
+    quality_severity = data_quality_report.get("overall_severity", "info")
+    quality_problems = data_quality_report.get("problems", [])
+    quality_bonds = data_quality_report.get("bonds", [])
+
+    if quality_bond_count == 0:
+        st.info("Нет данных по облигациям для оценки качества.")
+    else:
+        severity_label = {
+            "critical": "критично",
+            "high": "высокий риск",
+            "warning": "предупреждение",
+            "info": "инфо",
+        }.get(quality_severity, "инфо")
+
+        qc1, qc2, qc3, qc4 = st.columns(4)
+        with qc1:
+            st.metric(
+                "Score качества",
+                f"{quality_score:.1f}%" if quality_score is not None else "нет данных",
+            )
+        with qc2:
+            st.metric("Проблемных бумаг", f"{data_quality_report.get('bonds_with_issues_count', 0)} из {quality_bond_count}")
+        with qc3:
+            st.metric("Проблемы данных", str(len(quality_problems)))
+        with qc4:
+            st.metric("Severity", severity_label)
+
+        if quality_problems:
+            top_problem = quality_problems[0]
+            top_share = top_problem.get("missing_share")
+            top_share_text = f"{top_share * 100:.1f}%" if top_share is not None else "нет данных"
+            st.caption(
+                f"Крупнейший пробел: {top_problem['title']} "
+                f"(бумаг: {top_problem['missing_count']}, доля портфеля: {top_share_text})."
+            )
+        else:
+            st.info("Критичных пробелов данных не обнаружено.")
+
+        with st.expander("Показать детали качества данных"):
+            if quality_problems:
+                problems_df = pd.DataFrame(quality_problems).copy()
+                problems_df["missing_share"] = problems_df["missing_share"].apply(
+                    lambda v: v * 100 if v is not None else None
+                )
+                problems_df = problems_df.rename(
+                    columns={
+                        "title": "Проблема",
+                        "missing_count": "Бумаг",
+                        "missing_value": "Стоимость ₽",
+                        "missing_share": "Доля портфеля %",
+                        "severity": "Severity",
+                    }
+                )
+                st.dataframe(
+                    problems_df[["Проблема", "Severity", "Бумаг", "Стоимость ₽", "Доля портфеля %"]],
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Стоимость ₽": st.column_config.NumberColumn(format="%.2f ₽"),
+                        "Доля портфеля %": st.column_config.NumberColumn(format="%.2f%%"),
+                        "Бумаг": st.column_config.NumberColumn(format="%d"),
+                    },
+                )
+            else:
+                st.info("Проблемы данных не обнаружены.")
+
+            if quality_bonds:
+                bonds_df = pd.DataFrame(quality_bonds).copy()
+                bonds_df["position_share"] = bonds_df["position_share"].apply(
+                    lambda v: v * 100 if v is not None else None
+                )
+                bonds_df = bonds_df.rename(
+                    columns={
+                        "name": "Инструмент",
+                        "isin": "ISIN",
+                        "missing_fields_text": "Отсутствуют поля",
+                        "missing_count": "Кол-во проблем",
+                        "position_share": "Доля портфеля %",
+                        "market_value": "Полная стоимость ₽",
+                        "completeness_pct": "Заполненность %",
+                    }
+                )
+                st.dataframe(
+                    bonds_df[[
+                        "Инструмент", "ISIN", "Отсутствуют поля", "Кол-во проблем",
+                        "Доля портфеля %", "Полная стоимость ₽", "Заполненность %"
+                    ]],
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Кол-во проблем": st.column_config.NumberColumn(format="%d"),
+                        "Доля портфеля %": st.column_config.NumberColumn(format="%.2f%%"),
+                        "Полная стоимость ₽": st.column_config.NumberColumn(format="%.2f ₽"),
+                        "Заполненность %": st.column_config.NumberColumn(format="%.1f%%"),
+                    },
+                )
+            else:
+                st.info("Список бумаг с отсутствующими данными пуст.")
 
     st.divider()
 
@@ -663,7 +781,7 @@ with tab_positions:
         st.info("Нет данных о позициях")
     else:
         # Загрузка средних цен
-        cost_map = db.get_cost_basis_map()
+        cost_map = cost_basis_all
 
         # Фильтры
         col_filter, col_status, col_sort = st.columns(3)
