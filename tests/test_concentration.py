@@ -130,6 +130,37 @@ class ConcentrationMetricsTests(unittest.TestCase):
         self.assertEqual(by_name["P15"], "high")
         self.assertEqual(by_name["P20"], "critical")
 
+    def test_severity_levels_for_issuer_thresholds_5_10_15_20(self):
+        items = concentration.build_concentration_warning_items(
+            position_rows=[],
+            issuer_rows=[
+                {"issuer": "I5", "issuer_share": 0.05},
+                {"issuer": "I10", "issuer_share": 0.10},
+                {"issuer": "I15", "issuer_share": 0.15},
+                {"issuer": "I20", "issuer_share": 0.20},
+            ],
+            corporate_bonds_share=None,
+            position_hhi=None,
+            issuer_hhi=None,
+        )
+
+        by_issuer = {}
+        for item in items:
+            text = item["text"]
+            if "I5" in text:
+                by_issuer["I5"] = item["severity"]
+            if "I10" in text:
+                by_issuer["I10"] = item["severity"]
+            if "I15" in text:
+                by_issuer["I15"] = item["severity"]
+            if "I20" in text:
+                by_issuer["I20"] = item["severity"]
+
+        self.assertEqual(by_issuer["I5"], "info")
+        self.assertEqual(by_issuer["I10"], "warning")
+        self.assertEqual(by_issuer["I15"], "high")
+        self.assertEqual(by_issuer["I20"], "critical")
+
     def test_warning_items_sorted_by_severity(self):
         items = concentration.build_concentration_warning_items(
             position_rows=[
@@ -145,6 +176,22 @@ class ConcentrationMetricsTests(unittest.TestCase):
 
         severities = [item["severity"] for item in items]
         self.assertEqual(severities, ["critical", "high", "info"])
+
+    def test_warning_items_with_same_severity_sorted_by_share(self):
+        items = concentration.build_concentration_warning_items(
+            position_rows=[
+                {"name": "P12", "position_share": 0.12},
+                {"name": "P10", "position_share": 0.10},
+            ],
+            issuer_rows=[],
+            corporate_bonds_share=None,
+            position_hhi=None,
+            issuer_hhi=None,
+        )
+
+        texts = [item["text"] for item in items]
+        self.assertIn("P12", texts[0])
+        self.assertIn("P10", texts[1])
 
     def test_metrics_expose_warning_items(self):
         positions = [

@@ -37,7 +37,12 @@ from portfolio_metrics import (
     calculate_total_portfolio_value,
     calculate_trades_stats,
 )
-from portfolio_tables import prepare_positions_dataset, prepare_positions_display_table
+from portfolio_tables import (
+    POSITIONS_TABLE_VIEW_MODES,
+    get_positions_table_columns,
+    prepare_positions_dataset,
+    prepare_positions_display_table,
+)
 from rebalancing import (
     DEFAULT_TARGETS as REBALANCE_DEFAULT_TARGETS,
     build_current_allocation,
@@ -525,8 +530,8 @@ with tab_overview:
                 "name": "Инструмент",
                 "isin": "ISIN",
                 "severity": "Severity",
-                "reason": "reason",
-                "suggested_action": "suggested_action",
+                "reason": "Причины",
+                "suggested_action": "Рекомендуемое действие",
                 "position_share": "Доля позиции %",
                 "issuer_share": "Доля эмитента %",
                 "market_value": "Полная стоимость ₽",
@@ -542,7 +547,7 @@ with tab_overview:
         )
         st.dataframe(
             attention_df[[
-                "Инструмент", "ISIN", "Severity", "reason", "suggested_action",
+                "Инструмент", "ISIN", "Severity", "Причины", "Рекомендуемое действие",
                 "Доля позиции %", "Доля эмитента %", "P&L %",
                 "Дней до погашения", "Полная стоимость ₽"
             ]],
@@ -868,6 +873,13 @@ with tab_positions:
     if pos_df.empty:
         st.info("Нет данных о позициях")
     else:
+        view_mode = st.radio(
+            "Режим таблицы",
+            options=list(POSITIONS_TABLE_VIEW_MODES),
+            index=0,
+            horizontal=True,
+        )
+
         # Загрузка средних цен
         cost_map = cost_basis_all
 
@@ -917,13 +929,13 @@ with tab_positions:
             format_ytm_fn=moex_api.format_ytm,
         )
 
+        selected_columns = get_positions_table_columns(
+            view_mode=view_mode,
+            available_columns=display_df.columns,
+        )
+
         st.dataframe(
-            display_df[[
-                "Инструмент", "Тип", "Эмитент", "Кол-во", "Ср. цена", "Цена", "YTM",
-                "Дней до погашения", "Лет до погашения",
-                "Цена к номиналу %", "Статус к номиналу",
-                "Доля портфеля %", "Доля эмитента %", "Полная стоимость", "Δ за день", "P&L ₽", "P&L %"
-            ]],
+            display_df[selected_columns],
             hide_index=True,
             use_container_width=True,
             height=min(700, len(filtered) * 38 + 40),

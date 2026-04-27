@@ -3,7 +3,12 @@ from datetime import date
 
 import pandas as pd
 
-from portfolio_tables import prepare_positions_dataset, prepare_positions_display_table
+from portfolio_tables import (
+    POSITIONS_TABLE_VIEW_MODES,
+    get_positions_table_columns,
+    prepare_positions_dataset,
+    prepare_positions_display_table,
+)
 
 
 class PortfolioTablesTests(unittest.TestCase):
@@ -82,6 +87,45 @@ class PortfolioTablesTests(unittest.TestCase):
 
         self.assertNotIn("avg_price", pos_df.columns)
         self.assertTrue(pos_df.equals(original))
+
+    def test_get_positions_table_columns_for_modes(self):
+        available = [
+            "Инструмент",
+            "Тип",
+            "Эмитент",
+            "YTM",
+            "Доля портфеля %",
+            "Доля эмитента %",
+            "Полная стоимость",
+            "Δ за день",
+            "P&L ₽",
+            "P&L %",
+        ]
+
+        self.assertIn("Все колонки", POSITIONS_TABLE_VIEW_MODES)
+        self.assertIn("Обзор", POSITIONS_TABLE_VIEW_MODES)
+        self.assertIn("Качество данных", POSITIONS_TABLE_VIEW_MODES)
+
+        overview_columns = get_positions_table_columns("Обзор", available)
+        self.assertEqual(
+            overview_columns,
+            ["Инструмент", "Тип", "Эмитент", "Доля портфеля %", "Доля эмитента %", "Полная стоимость", "Δ за день"],
+        )
+
+        risk_columns = get_positions_table_columns("Риск", available)
+        self.assertEqual(
+            risk_columns,
+            ["Инструмент", "Тип", "Эмитент", "Доля портфеля %", "Доля эмитента %", "YTM", "Полная стоимость"],
+        )
+
+    def test_get_positions_table_columns_fallbacks(self):
+        available = ["Инструмент", "Тип", "Полная стоимость"]
+
+        unknown_mode_columns = get_positions_table_columns("Неизвестный режим", available)
+        self.assertEqual(unknown_mode_columns, available)
+
+        empty_intersection_columns = get_positions_table_columns("Календарь", ["Инструмент"])
+        self.assertEqual(empty_intersection_columns, ["Инструмент"])
 
 
 if __name__ == "__main__":

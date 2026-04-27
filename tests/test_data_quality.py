@@ -91,6 +91,21 @@ class BondDataQualityTests(unittest.TestCase):
 
 
 class AttentionListTests(unittest.TestCase):
+    def test_empty_input_returns_empty_list(self):
+        attention = build_attention_list(
+            positions=[],
+            position_share_map={},
+            issuer_share_map={},
+            issuer_map={},
+            ytm_map={},
+            maturity_by_isin={},
+            coupons=[],
+            cost_basis={},
+            as_of_date=date(2026, 4, 27),
+        )
+
+        self.assertEqual(attention, [])
+
     def test_one_bond_can_have_multiple_reasons(self):
         positions = [
             {
