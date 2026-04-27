@@ -11,6 +11,7 @@ from datetime import datetime, date
 from pathlib import Path
 
 from analytics.bonds import calculate_weighted_ytm, calculate_weighted_years_to_maturity
+from analytics.cashflows import build_coupon_cashflow_by_month
 import concentration
 import db
 import moex_api
@@ -951,10 +952,22 @@ with tab_calendar:
             next_coupon = upcoming.iloc[0]
             days_to_next = (next_coupon["coupon_date"] - today).days
 
-            # Доход по месяцам
+            # Доход по месяцам (для KPI текущего месяца)
             upcoming_monthly = upcoming.copy()
             upcoming_monthly["month"] = upcoming_monthly["coupon_date"].dt.to_period("M")
             monthly_income = upcoming_monthly.groupby("month")["expected_income"].sum()
+
+            cashflow_12m = build_coupon_cashflow_by_month(
+                coupons=coupons,
+                positions=positions,
+                months=12,
+                as_of_date=date.today(),
+            )
+            cashflow_df = pd.DataFrame(cashflow_12m["months"])
+            cashflow_df["month_label"] = pd.to_datetime(
+                cashflow_df["month"] + "-01",
+                format="%Y-%m-%d",
+            ).dt.strftime("%m.%Y")
 
             c1, c2, c3, c4 = st.columns(4)
             with c1:
@@ -973,24 +986,20 @@ with tab_calendar:
 
             st.divider()
 
-            # ─── График купонов по месяцам ───
-            st.subheader("📊 Купонный поток по месяцам")
-
-            monthly_df = upcoming_monthly.groupby("month").agg(
-                income=("expected_income", "sum"),
-                count=("name", "count"),
-            ).reset_index()
-            monthly_df["month_str"] = monthly_df["month"].astype(str)
+            # ─── Купонный поток на 12 месяцев ───
+            st.subheader("📊 Купонный поток на 12 месяцев")
+            if cashflow_12m["total_payments"] == 0:
+                st.info("На ближайшие 12 месяцев: нет данных по купонным выплатам.")
 
             fig_monthly = go.Figure()
             fig_monthly.add_trace(go.Bar(
-                x=monthly_df["month_str"],
-                y=monthly_df["income"],
-                text=monthly_df["income"].apply(lambda v: f"{v:,.0f} ₽"),
+                x=cashflow_df["month_label"],
+                y=cashflow_df["income"],
+                text=cashflow_df["income"].apply(lambda v: f"{v:,.0f} ₽"),
                 textposition="outside",
                 marker_color="#22d3ee",
                 hovertemplate="<b>%{x}</b><br>Доход: %{y:,.2f} ₽<br>Выплат: %{customdata}<extra></extra>",
-                customdata=monthly_df["count"],
+                customdata=cashflow_df["payments_count"],
             ))
             fig_monthly.update_layout(
                 xaxis_title="",
@@ -1001,6 +1010,26 @@ with tab_calendar:
                 plot_bgcolor="rgba(0,0,0,0)",
             )
             st.plotly_chart(fig_monthly, use_container_width=True)
+
+            cashflow_display = cashflow_df[[
+                "month_label", "income", "payments_count", "bonds_text"
+            ]].rename(
+                columns={
+                    "month_label": "Месяц",
+                    "income": "Сумма купонов ₽",
+                    "payments_count": "Выплат",
+                    "bonds_text": "Список бумаг",
+                }
+            )
+            st.dataframe(
+                cashflow_display,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Сумма купонов ₽": st.column_config.NumberColumn(format="%.2f ₽"),
+                    "Выплат": st.column_config.NumberColumn(format="%d"),
+                },
+            )
 
             st.divider()
 
