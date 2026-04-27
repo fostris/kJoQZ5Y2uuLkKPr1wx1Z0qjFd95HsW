@@ -26,6 +26,8 @@ MOEX_BASE = "https://iss.moex.com/iss"
 REQUEST_DELAY = 0.25  # Задержка между запросами (MOEX рекомендует не чаще 4 req/s)
 YTM_CACHE_TTL_SEC = 300
 ISIN_SEARCH_CACHE_TTL_SEC = 3600
+FETCH_MAX_RETRIES = 3
+FETCH_RETRY_BACKOFF_SEC = 0.5
 
 _YTM_CACHE: dict[str, tuple[float, float | None]] = {}
 _ISIN_TO_TICKER_CACHE: dict[str, str | None] = {}
@@ -56,15 +58,58 @@ class CouponInfo:
     coupon_number: int     # номер купона
 
 
-def _fetch_json(url: str) -> dict:
-    """GET-запрос к MOEX ISS, возвращает JSON."""
+def _is_retryable_error(error: URLError | HTTPError) -> bool:
+    code = getattr(error, "code", None)
+    if code is None:
+        return True
+    return int(code) in (429, 500, 502, 503, 504)
+
+
+def _fetch_json(
+    url: str,
+    *,
+    return_status: bool = False,
+) -> dict | tuple[dict, int | None, str | None]:
+    """GET-запрос к MOEX ISS с retry/backoff для временных ошибок."""
     req = Request(url, headers={"User-Agent": "BrokerDashboard/1.0"})
-    try:
-        with urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except (URLError, HTTPError) as e:
-        logger.error(f"MOEX API error: {url} → {e}")
-        return {}
+    last_error: URLError | HTTPError | None = None
+    status_code: int | None = None
+
+    for attempt in range(1, FETCH_MAX_RETRIES + 1):
+        try:
+            with urlopen(req, timeout=15) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+                if return_status:
+                    return payload, getattr(resp, "status", None), None
+                return payload
+        except (URLError, HTTPError) as error:
+            last_error = error
+            status_code = getattr(error, "code", None)
+            retryable = _is_retryable_error(error)
+            has_retry = attempt < FETCH_MAX_RETRIES
+            if retryable and has_retry:
+                sleep_seconds = FETCH_RETRY_BACKOFF_SEC * (2 ** (attempt - 1))
+                logger.warning(
+                    "MOEX API temporary error (attempt %s/%s): %s → %s. Retry in %.2fs.",
+                    attempt,
+                    FETCH_MAX_RETRIES,
+                    url,
+                    error,
+                    sleep_seconds,
+                )
+                time.sleep(sleep_seconds)
+                continue
+            break
+
+    logger.error(
+        "MOEX API error after %s attempts: %s → %s",
+        FETCH_MAX_RETRIES,
+        url,
+        last_error,
+    )
+    if return_status:
+        return {}, status_code, str(last_error) if last_error else "unknown error"
+    return {}
 
 
 def _iss_to_rows(data: dict, block: str) -> list[dict]:
