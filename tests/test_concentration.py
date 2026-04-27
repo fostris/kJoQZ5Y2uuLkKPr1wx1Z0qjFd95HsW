@@ -79,6 +79,48 @@ class ConcentrationMetricsTests(unittest.TestCase):
 
         self.assertTrue(any("Доля корпоративных облигаций" in msg for msg in metrics["warnings"]))
 
+    def test_warning_for_sector_share_over_limit(self):
+        positions = [
+            {"name": "Bond A", "isin": "ISIN1", "asset_type": "bond_corp", "value_end": 120.0, "nkd_end": 0.0},
+            {"name": "Bond B", "isin": "ISIN2", "asset_type": "bond_corp", "value_end": 120.0, "nkd_end": 0.0},
+            {"name": "Bond C", "isin": "ISIN3", "asset_type": "bond_corp", "value_end": 60.0, "nkd_end": 0.0},
+        ]
+        metrics = concentration.calculate_concentration_metrics(
+            positions,
+            issuer_by_isin={"ISIN1": "Issuer A", "ISIN2": "Issuer B", "ISIN3": "Issuer C"},
+            issuer_reference_by_name={
+                "Issuer A": {"sector": "Finance"},
+                "Issuer B": {"sector": "Finance"},
+                "Issuer C": {"sector": "Energy"},
+            },
+        )
+
+        self.assertTrue(
+            any(item.get("kind") == "sector_share" for item in metrics["warning_items"])
+        )
+        self.assertTrue(any("Сектор 'Finance'" in msg for msg in metrics["warnings"]))
+
+    def test_warning_for_issuer_group_share_over_limit(self):
+        positions = [
+            {"name": "Bond A", "isin": "ISIN1", "asset_type": "bond_corp", "value_end": 120.0, "nkd_end": 0.0},
+            {"name": "Bond B", "isin": "ISIN2", "asset_type": "bond_corp", "value_end": 120.0, "nkd_end": 0.0},
+            {"name": "Bond C", "isin": "ISIN3", "asset_type": "bond_corp", "value_end": 60.0, "nkd_end": 0.0},
+        ]
+        metrics = concentration.calculate_concentration_metrics(
+            positions,
+            issuer_by_isin={"ISIN1": "Issuer A", "ISIN2": "Issuer B", "ISIN3": "Issuer C"},
+            issuer_reference_by_name={
+                "Issuer A": {"issuer_group": "Group 1"},
+                "Issuer B": {"issuer_group": "Group 1"},
+                "Issuer C": {"issuer_group": "Group 2"},
+            },
+        )
+
+        self.assertTrue(
+            any(item.get("kind") == "issuer_group_share" for item in metrics["warning_items"])
+        )
+        self.assertTrue(any("Группа эмитентов 'Group 1'" in msg for msg in metrics["warnings"]))
+
     def test_empty_portfolio(self):
         metrics = concentration.calculate_concentration_metrics([])
 
@@ -129,6 +171,25 @@ class ConcentrationMetricsTests(unittest.TestCase):
         groups = {row["issuer_group"]: row for row in metrics["issuer_groups"]}
         self.assertAlmostEqual(groups["Group 1"]["dimension_share"], 0.5)
         self.assertAlmostEqual(groups["Group 2"]["dimension_share"], 0.5)
+
+    def test_two_bonds_in_same_group_are_aggregated(self):
+        positions = [
+            {"name": "Bond 1", "isin": "ISIN1", "asset_type": "bond_corp", "value_end": 100.0, "nkd_end": 0.0},
+            {"name": "Bond 2", "isin": "ISIN2", "asset_type": "bond_corp", "value_end": 100.0, "nkd_end": 0.0},
+        ]
+        metrics = concentration.calculate_concentration_metrics(
+            positions,
+            issuer_by_isin={"ISIN1": "Issuer A", "ISIN2": "Issuer B"},
+            issuer_reference_by_name={
+                "Issuer A": {"issuer_group": "Group X"},
+                "Issuer B": {"issuer_group": "Group X"},
+            },
+        )
+
+        groups = {row["issuer_group"]: row for row in metrics["issuer_groups"]}
+        self.assertEqual(set(groups["Group X"]["issuers"]), {"Issuer A", "Issuer B"})
+        self.assertEqual(groups["Group X"]["issuers_count"], 2)
+        self.assertAlmostEqual(groups["Group X"]["dimension_share"], 1.0)
 
     def test_sector_and_group_fallback_when_reference_is_missing(self):
         positions = [

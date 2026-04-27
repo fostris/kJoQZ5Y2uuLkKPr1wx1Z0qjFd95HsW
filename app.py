@@ -703,6 +703,8 @@ with tab_overview:
 
     sector_rows = concentration_metrics.get("sectors", [])
     issuer_group_rows = concentration_metrics.get("issuer_groups", [])
+    sector_limit = concentration.MAX_SECTOR_SHARE
+    issuer_group_limit = concentration.MAX_ISSUER_GROUP_SHARE
 
     sg_col1, sg_col2 = st.columns(2)
     with sg_col1:
@@ -719,8 +721,13 @@ with tab_overview:
             sector_df["Доля портфеля"] = sector_df["Доля портфеля"].apply(
                 lambda v: v * 100 if v is not None else None
             )
+            sector_df["Лимит"] = sector_df["Доля портфеля"].apply(
+                lambda v: f"⚠️ >{sector_limit * 100:.0f}%"
+                if v is not None and v > sector_limit * 100
+                else "OK"
+            )
             st.dataframe(
-                sector_df[["Сектор", "Рыночная стоимость", "Доля портфеля", "Эмитентов"]],
+                sector_df[["Сектор", "Рыночная стоимость", "Доля портфеля", "Эмитентов", "Лимит"]],
                 hide_index=True,
                 use_container_width=True,
                 column_config={
@@ -729,6 +736,53 @@ with tab_overview:
                     "Эмитентов": st.column_config.NumberColumn(format="%d"),
                 },
             )
+
+            sector_chart_df = pd.DataFrame(sector_rows).sort_values(
+                "dimension_share",
+                ascending=False,
+            )
+            sector_chart_df["share_pct"] = sector_chart_df["dimension_share"].apply(
+                lambda v: (v or 0.0) * 100
+            )
+            sector_fig = px.bar(
+                sector_chart_df,
+                x="sector",
+                y="share_pct",
+                text="share_pct",
+                labels={
+                    "sector": "Сектор",
+                    "share_pct": "Доля портфеля, %",
+                },
+                color="sector",
+            )
+            sector_fig.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+            sector_fig.update_layout(
+                showlegend=False,
+                margin=dict(l=8, r=8, t=24, b=8),
+                xaxis_title=None,
+                yaxis_title="Доля портфеля, %",
+                yaxis=dict(rangemode="tozero"),
+            )
+            sector_fig.add_hline(
+                y=sector_limit * 100,
+                line_dash="dash",
+                line_color="#ef4444",
+                annotation_text=f"Лимит {sector_limit * 100:.0f}%",
+                annotation_position="top left",
+            )
+            st.plotly_chart(sector_fig, use_container_width=True)
+
+            breached_sectors = [
+                row.get("sector")
+                for row in sector_rows
+                if (row.get("dimension_share") or 0.0) > sector_limit
+            ]
+            if breached_sectors:
+                st.warning(
+                    "Превышение секторного лимита: "
+                    + ", ".join(str(name) for name in breached_sectors)
+                    + "."
+                )
         else:
             st.info("Нет данных для расчёта секторной концентрации.")
 
@@ -741,13 +795,29 @@ with tab_overview:
                     "market_value": "Рыночная стоимость",
                     "dimension_share": "Доля портфеля",
                     "issuers_count": "Эмитентов",
+                    "issuers": "Состав группы",
                 }
             )
             group_df["Доля портфеля"] = group_df["Доля портфеля"].apply(
                 lambda v: v * 100 if v is not None else None
             )
+            group_df["Состав группы"] = group_df["Состав группы"].apply(
+                lambda v: ", ".join(v) if isinstance(v, list) and v else "—"
+            )
+            group_df["Лимит"] = group_df["Доля портфеля"].apply(
+                lambda v: f"⚠️ >{issuer_group_limit * 100:.0f}%"
+                if v is not None and v > issuer_group_limit * 100
+                else "OK"
+            )
             st.dataframe(
-                group_df[["Группа эмитентов", "Рыночная стоимость", "Доля портфеля", "Эмитентов"]],
+                group_df[[
+                    "Группа эмитентов",
+                    "Рыночная стоимость",
+                    "Доля портфеля",
+                    "Эмитентов",
+                    "Лимит",
+                    "Состав группы",
+                ]],
                 hide_index=True,
                 use_container_width=True,
                 column_config={
@@ -756,6 +826,17 @@ with tab_overview:
                     "Эмитентов": st.column_config.NumberColumn(format="%d"),
                 },
             )
+            breached_groups = [
+                row.get("issuer_group")
+                for row in issuer_group_rows
+                if (row.get("dimension_share") or 0.0) > issuer_group_limit
+            ]
+            if breached_groups:
+                st.warning(
+                    "Превышение лимита по группам эмитентов: "
+                    + ", ".join(str(name) for name in breached_groups)
+                    + "."
+                )
         else:
             st.info("Нет данных для расчёта концентрации по группам эмитентов.")
 

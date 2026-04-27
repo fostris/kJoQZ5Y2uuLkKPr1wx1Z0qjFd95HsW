@@ -7,6 +7,8 @@ from typing import Any, Mapping
 
 MAX_POSITION_SHARE = 0.10
 MAX_ISSUER_SHARE = 0.10
+MAX_SECTOR_SHARE = 0.30
+MAX_ISSUER_GROUP_SHARE = 0.30
 MAX_CORPORATE_BONDS_SHARE = 0.70
 MAX_ISSUER_HHI = 0.18
 MAX_POSITION_HHI = 0.18
@@ -208,6 +210,7 @@ def aggregate_issuer_dimension(
                 "market_value": market_value,
                 "dimension_share": share,
                 "issuers_count": len(by_dimension_issuers.get(dimension_value, set())),
+                "issuers": sorted(by_dimension_issuers.get(dimension_value, set())),
             }
         )
 
@@ -237,6 +240,8 @@ def build_concentration_warning_items(
     corporate_bonds_share: float | None,
     position_hhi: float | None,
     issuer_hhi: float | None,
+    sector_rows: list[Mapping[str, Any]] | None = None,
+    issuer_group_rows: list[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Структурированные предупреждения концентрации с severity."""
     warnings: list[dict[str, Any]] = []
@@ -272,6 +277,38 @@ def build_concentration_warning_items(
                     ),
                 }
             )
+
+    for row in (sector_rows or []):
+        share = _to_float(row.get("dimension_share"))
+        if share is None or share <= MAX_SECTOR_SHARE:
+            continue
+        warnings.append(
+            {
+                "kind": "sector_share",
+                "severity": "warning",
+                "share": share,
+                "text": (
+                    f"Сектор '{row.get('sector', UNKNOWN_SECTOR)}' занимает "
+                    f"{share * 100:.1f}% портфеля (> {MAX_SECTOR_SHARE * 100:.0f}%)."
+                ),
+            }
+        )
+
+    for row in (issuer_group_rows or []):
+        share = _to_float(row.get("dimension_share"))
+        if share is None or share <= MAX_ISSUER_GROUP_SHARE:
+            continue
+        warnings.append(
+            {
+                "kind": "issuer_group_share",
+                "severity": "warning",
+                "share": share,
+                "text": (
+                    f"Группа эмитентов '{row.get('issuer_group', UNKNOWN_ISSUER)}' занимает "
+                    f"{share * 100:.1f}% портфеля (> {MAX_ISSUER_GROUP_SHARE * 100:.0f}%)."
+                ),
+            }
+        )
 
     if corporate_bonds_share is not None and corporate_bonds_share > MAX_CORPORATE_BONDS_SHARE:
         warnings.append(
@@ -370,6 +407,8 @@ def calculate_concentration_metrics(
     warning_items = build_concentration_warning_items(
         position_rows=position_rows,
         issuer_rows=issuer_rows,
+        sector_rows=sector_rows,
+        issuer_group_rows=issuer_group_rows,
         corporate_bonds_share=corporate_bonds_share,
         position_hhi=position_hhi,
         issuer_hhi=issuer_hhi,
