@@ -312,6 +312,32 @@ class ConcentrationMetricsTests(unittest.TestCase):
         self.assertIn("severity", metrics["warning_items"][0])
         self.assertIn("text", metrics["warning_items"][0])
 
+    def test_asset_type_distribution_separates_ofz_pd_and_ofz_in(self):
+        positions = [
+            {"name": "ОФЗ-ПД", "isin": "PD1", "asset_type": "bond_ofz_pd", "value_end": 100.0, "nkd_end": 0.0},
+            {"name": "ОФЗ-ИН", "isin": "IN1", "asset_type": "bond_ofz_in", "value_end": 50.0, "nkd_end": 0.0},
+            {"name": "Корп", "isin": "C1", "asset_type": "bond_corp", "value_end": 50.0, "nkd_end": 0.0},
+        ]
+        metrics = concentration.calculate_concentration_metrics(positions)
+        rows = {row["asset_type"]: row for row in metrics["asset_types"]}
+
+        self.assertAlmostEqual(rows["bond_ofz_pd"]["asset_type_share"], 0.5)
+        self.assertAlmostEqual(rows["bond_ofz_in"]["asset_type_share"], 0.25)
+        self.assertAlmostEqual(rows["bond_corp"]["asset_type_share"], 0.25)
+
+    def test_ofz_pd_and_ofz_in_are_aggregated_into_minfin_issuer(self):
+        positions = [
+            {"name": "ОФЗ ПД", "isin": "PD1", "asset_type": "bond_ofz_pd", "value_end": 120.0, "nkd_end": 0.0},
+            {"name": "ОФЗ ИН", "isin": "IN1", "asset_type": "bond_ofz_in", "value_end": 80.0, "nkd_end": 0.0},
+        ]
+        metrics = concentration.calculate_concentration_metrics(
+            positions,
+            issuer_by_isin={"PD1": "Министерство финансов РФ", "IN1": "Минфин России"},
+        )
+        self.assertEqual(len(metrics["issuers"]), 1)
+        self.assertEqual(metrics["issuers"][0]["issuer"], concentration.MINFIN_ISSUER)
+        self.assertAlmostEqual(metrics["issuers"][0]["issuer_share"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

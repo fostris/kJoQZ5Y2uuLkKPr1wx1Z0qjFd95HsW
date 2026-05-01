@@ -108,6 +108,35 @@ class BuyScenarioTests(unittest.TestCase):
         self.assertIn("нет YTM", result["candidates"][0]["warnings"])
         self.assertIn("YTM нет", result["candidates"][0]["explanation"])
 
+    def test_ofz_pd_and_ofz_in_use_combined_minfin_issuer_share(self):
+        positions = [
+            {"name": "ОФЗ-ПД", "isin": "OFZPD", "asset_type": "bond_ofz_pd", "value_end": 100.0, "nkd_end": 0.0},
+            {"name": "ОФЗ-ИН", "isin": "OFZIN", "asset_type": "bond_ofz_in", "value_end": 100.0, "nkd_end": 0.0},
+        ]
+        result = build_buy_candidates(
+            positions=positions,
+            free_cash=100.0,
+            issuer_by_isin={"OFZPD": "Минфин России", "OFZIN": "Министерство финансов РФ"},
+            ytm_by_isin={"OFZPD": 10.0, "OFZIN": 10.0},
+            maturity_by_isin={"OFZPD": "2028-01-01", "OFZIN": "2028-01-01"},
+            position_share_map={"OFZPD": 0.05, "OFZIN": 0.05},
+            issuer_share_map={"Минфин РФ": 0.2},
+            current_type_pct={"bond_ofz_pd": 10.0, "bond_ofz_in": 5.0},
+            target_type_pct={"bond_ofz_pd": 10.0, "bond_ofz_in": 7.0},
+            total_portfolio_value=1_000.0,
+            max_issuer_share=0.10,
+            max_position_share=0.10,
+            min_ytm=5.0,
+            max_years_to_maturity=10.0,
+            exclude_without_ytm=True,
+            exclude_without_maturity=True,
+            bond_asset_types=("bond_corp", "bond_ofz_pd", "bond_ofz_in"),
+            as_of_date=date(2026, 4, 28),
+        )
+        self.assertEqual(result["candidates"], [])
+        summary = {row["reason_code"]: row["count"] for row in result["excluded_summary"]}
+        self.assertEqual(summary["issuer_share_limit"], 2)
+
 
 class ReduceScenarioTests(unittest.TestCase):
     def test_reduce_candidates_include_reasons_and_sorted_by_score(self):

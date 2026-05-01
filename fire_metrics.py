@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import random
-from datetime import datetime
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
@@ -37,49 +36,164 @@ def calculate_fire_basics(
     }
 
 
+SCENARIO_PRESETS = {
+    "base": {
+        "label": "Базовый",
+        "inflation_rate": 0.07,
+        "nominal_return_rate": 0.11,
+        "weight": 0.55,
+    },
+    "stagflation": {
+        "label": "Стагфляционный",
+        "inflation_rate": 0.10,
+        "nominal_return_rate": 0.11,
+        "weight": 0.20,
+    },
+    "optimistic": {
+        "label": "Оптимистичный",
+        "inflation_rate": 0.04,
+        "nominal_return_rate": 0.115,
+        "weight": 0.10,
+    },
+}
+
+
+def _safe_monthly_rate(annual_rate: float) -> float:
+    if annual_rate <= -1.0:
+        return -1.0
+    return (1.0 + annual_rate) ** (1.0 / 12.0) - 1.0
+
+
+def _target_capital(annual_expense: float, swr: float) -> float:
+    if swr <= 0:
+        return float("inf")
+    return annual_expense / swr
+
+
 def build_fire_projection(
-    current_portfolio: float,
-    fire_age: int,
-    fire_life_expectancy: int,
-    fire_monthly_contrib: float,
-    fire_contrib_growth: float,
-    fire_return_nominal: float,
-    fire_inflation: float,
-    fire_target: float,
-    base_year: int | None = None,
-) -> tuple[pd.DataFrame, int | None]:
-    """Годовой прогноз FIRE (номинал/реал) и возраст достижения цели."""
-    years_horizon = fire_life_expectancy - fire_age
-    projection = []
+    *,
+    current_capital: float,
+    monthly_contribution: float,
+    monthly_target_expense: float,
+    inflation_rate: float,
+    nominal_return_rate: float,
+    swr_target: float,
+    swr_withdrawal: float,
+    horizon_years: int = 30,
+) -> dict:
+    """FIRE-проекция с расчётом в реальных рублях."""
+    start_capital = max(float(current_capital or 0.0), 0.0)
+    monthly_contrib = max(float(monthly_contribution or 0.0), 0.0)
+    monthly_expense = max(float(monthly_target_expense or 0.0), 0.0)
+    inflation = float(inflation_rate or 0.0)
+    nominal_return = float(nominal_return_rate or 0.0)
+    swr_goal = float(swr_target or 0.0)
+    swr_operational = float(swr_withdrawal or 0.0)
+    years = max(int(horizon_years or 0), 0)
 
-    balance = current_portfolio
-    monthly_contrib = fire_monthly_contrib
-    monthly_return = (1 + fire_return_nominal / 100) ** (1 / 12) - 1
-    fire_reached_age = None
-    year0 = base_year if base_year is not None else datetime.now().year
+    real_return_rate = nominal_return - inflation
+    annual_target_expense_today = monthly_expense * 12.0
+    target_capital_goal = _target_capital(annual_target_expense_today, swr_goal)
+    target_capital_operational = _target_capital(annual_target_expense_today, swr_operational)
 
-    for year in range(years_horizon + 1):
-        age = fire_age + year
-        real_balance = balance / ((1 + fire_inflation / 100) ** year)
+    monthly_real_return = _safe_monthly_rate(real_return_rate)
+    trajectory: list[dict[str, float | int]] = []
+    years_to_fire_goal: float | None = None
+    years_to_fire_operational: float | None = None
 
-        projection.append({
-            "Год": year0 + year,
-            "Возраст": age,
-            "Портфель": balance,
-            "Портфель (реальн.)": real_balance,
-            "Цель FIRE": fire_target * ((1 + fire_inflation / 100) ** year),
-            "Цель FIRE (реальн.)": fire_target,
-        })
+    capital_real = start_capital
+    if capital_real >= target_capital_goal:
+        years_to_fire_goal = 0.0
+    if capital_real >= target_capital_operational:
+        years_to_fire_operational = 0.0
 
-        if fire_reached_age is None and real_balance >= fire_target:
-            fire_reached_age = age
+    total_months = years * 12
+    for month_index in range(1, total_months + 1):
+        capital_real = capital_real * (1.0 + monthly_real_return) + monthly_contrib
+        year = month_index // 12
 
-        for _ in range(12):
-            balance = balance * (1 + monthly_return) + monthly_contrib
+        if years_to_fire_goal is None and capital_real >= target_capital_goal:
+            years_to_fire_goal = month_index / 12.0
+        if years_to_fire_operational is None and capital_real >= target_capital_operational:
+            years_to_fire_operational = month_index / 12.0
 
-        monthly_contrib *= (1 + fire_contrib_growth / 100)
+        if month_index % 12 != 0:
+            continue
 
-    return pd.DataFrame(projection), fire_reached_age
+        capital_nominal = capital_real * ((1.0 + inflation) ** year)
+        trajectory.append(
+            {
+                "year": year,
+                "capital_real": capital_real,
+                "capital_nominal": capital_nominal,
+            }
+        )
+
+    if years_to_fire_goal is not None and years_to_fire_goal > years:
+        years_to_fire_goal = None
+    if years_to_fire_operational is not None and years_to_fire_operational > years:
+        years_to_fire_operational = None
+
+    return {
+        "real_return_rate": real_return_rate,
+        "annual_target_expense_today": annual_target_expense_today,
+        "target_capital_swr_target_real": target_capital_goal,
+        "target_capital_swr_withdrawal_real": target_capital_operational,
+        "years_to_fire_swr_target": years_to_fire_goal,
+        "years_to_fire_swr_withdrawal": years_to_fire_operational,
+        "trajectory": trajectory,
+        "params": {
+            "current_capital": start_capital,
+            "monthly_contribution": monthly_contrib,
+            "monthly_target_expense": monthly_expense,
+            "inflation_rate": inflation,
+            "nominal_return_rate": nominal_return,
+            "swr_target": swr_goal,
+            "swr_withdrawal": swr_operational,
+            "horizon_years": years,
+        },
+    }
+
+
+def build_fire_scenarios(
+    *,
+    current_capital: float,
+    monthly_contribution: float,
+    monthly_target_expense: float,
+    swr_target: float = 0.03,
+    swr_withdrawal: float = 0.035,
+    horizon_years: int = 30,
+    presets: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict:
+    """Рассчитать FIRE-проекции по набору сценариев."""
+    scenario_presets: Mapping[str, Mapping[str, Any]] = presets or SCENARIO_PRESETS
+    scenarios: dict[str, dict] = {}
+    used_presets: dict[str, dict] = {}
+
+    for key, preset in scenario_presets.items():
+        inflation_rate = float(preset.get("inflation_rate", 0.0) or 0.0)
+        nominal_return_rate = float(preset.get("nominal_return_rate", 0.0) or 0.0)
+        used_presets[key] = {
+            "label": str(preset.get("label") or key),
+            "inflation_rate": inflation_rate,
+            "nominal_return_rate": nominal_return_rate,
+            "weight": float(preset.get("weight", 0.0) or 0.0),
+        }
+        scenarios[key] = build_fire_projection(
+            current_capital=current_capital,
+            monthly_contribution=monthly_contribution,
+            monthly_target_expense=monthly_target_expense,
+            inflation_rate=inflation_rate,
+            nominal_return_rate=nominal_return_rate,
+            swr_target=swr_target,
+            swr_withdrawal=swr_withdrawal,
+            horizon_years=horizon_years,
+        )
+
+    return {
+        "scenarios": scenarios,
+        "presets": used_presets,
+    }
 
 
 def build_contribution_series(initial_monthly: float, growth_pct: float, periods: int) -> list[float]:

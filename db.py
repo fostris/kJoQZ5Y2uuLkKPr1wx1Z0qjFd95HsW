@@ -66,6 +66,19 @@ SCHEMA_MIGRATIONS: list[tuple[int, str, str]] = [
             ON bond_ratings(isin);
         """,
     ),
+    (
+        5,
+        "add_instrument_fx",
+        """
+        CREATE TABLE IF NOT EXISTS instrument_fx (
+            isin TEXT PRIMARY KEY,
+            currency TEXT NOT NULL DEFAULT 'RUB',
+            exposure_type TEXT NOT NULL DEFAULT 'rub',
+            note TEXT DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        """,
+    ),
 ]
 
 
@@ -309,6 +322,14 @@ def init_db():
                 updated_at TEXT DEFAULT (datetime('now')),
                 UNIQUE(name)
             );
+
+            CREATE TABLE IF NOT EXISTS instrument_fx (
+                isin TEXT PRIMARY KEY,
+                currency TEXT NOT NULL DEFAULT 'RUB',
+                exposure_type TEXT NOT NULL DEFAULT 'rub',
+                note TEXT DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
         """)
         apply_migrations(conn)
 
@@ -401,8 +422,7 @@ def get_latest_report():
     """Последний импортированный отчёт."""
     with get_db() as conn:
         return conn.execute(
-            "SELECT * FROM reports ORDER BY period_end DESC LIMIT 1"
-        ).fetchone()
+            "SELECT * FROM reports ORDER BY substr(period_end,7,4)||substr(period_end,4,2)||substr(period_end,1,2) DESC LIMIT 1"        ).fetchone()
 
 
 def get_positions(report_id: int):
@@ -784,6 +804,84 @@ def delete_bond_rating(isin: str) -> None:
         return
     with get_db() as conn:
         conn.execute("DELETE FROM bond_ratings WHERE isin = ?", (normalized_isin,))
+
+
+# ─── Instrument FX Overrides ───
+
+FX_DEFAULT_CURRENCY = "RUB"
+FX_DEFAULT_EXPOSURE_TYPE = "rub"
+FX_ALLOWED_CURRENCIES = {"RUB", "USD", "CNY", "EUR", "GOLD"}
+FX_ALLOWED_EXPOSURE_TYPES = {"rub", "fx_substitute", "fx_direct", "gold", "commodity_proxy"}
+
+
+def _normalize_isin(isin: str) -> str:
+    return (isin or "").strip().upper()
+
+
+def get_instrument_fx(isin: str) -> dict:
+    """Получить FX-метаданные по ISIN (или безопасные дефолты, если записи нет)."""
+    normalized_isin = _normalize_isin(isin)
+    if not normalized_isin:
+        return {
+            "isin": "",
+            "currency": FX_DEFAULT_CURRENCY,
+            "exposure_type": FX_DEFAULT_EXPOSURE_TYPE,
+            "note": "",
+            "updated_at": None,
+        }
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT isin, currency, exposure_type, note, updated_at FROM instrument_fx WHERE isin = ?",
+            (normalized_isin,),
+        ).fetchone()
+
+    if not row:
+        return {
+            "isin": normalized_isin,
+            "currency": FX_DEFAULT_CURRENCY,
+            "exposure_type": FX_DEFAULT_EXPOSURE_TYPE,
+            "note": "",
+            "updated_at": None,
+        }
+    return dict(row)
+
+
+def set_instrument_fx(isin: str, currency: str, exposure_type: str, note: str = "") -> None:
+    """Добавить/обновить FX-метаданные по ISIN."""
+    normalized_isin = _normalize_isin(isin)
+    normalized_currency = (currency or FX_DEFAULT_CURRENCY).strip().upper()
+    normalized_exposure_type = (exposure_type or FX_DEFAULT_EXPOSURE_TYPE).strip().lower()
+    normalized_note = (note or "").strip()
+
+    if not normalized_isin:
+        raise ValueError("isin is required")
+    if normalized_currency not in FX_ALLOWED_CURRENCIES:
+        raise ValueError(f"unsupported currency: {normalized_currency}")
+    if normalized_exposure_type not in FX_ALLOWED_EXPOSURE_TYPES:
+        raise ValueError(f"unsupported exposure_type: {normalized_exposure_type}")
+
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO instrument_fx (isin, currency, exposure_type, note, updated_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(isin) DO UPDATE SET
+                currency=excluded.currency,
+                exposure_type=excluded.exposure_type,
+                note=excluded.note,
+                updated_at=datetime('now')
+            """,
+            (normalized_isin, normalized_currency, normalized_exposure_type, normalized_note),
+        )
+
+
+def list_instrument_fx() -> list[sqlite3.Row]:
+    """Все пользовательские FX-override записи."""
+    with get_db() as conn:
+        return conn.execute(
+            "SELECT isin, currency, exposure_type, note, updated_at FROM instrument_fx ORDER BY isin"
+        ).fetchall()
 
 
 # ─── Rebalance Targets ───

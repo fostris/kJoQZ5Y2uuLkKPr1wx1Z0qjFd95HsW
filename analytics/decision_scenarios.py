@@ -179,7 +179,10 @@ def build_buy_candidates(
 
         isin = str(row.get("isin") or "").strip().upper()
         name = str(row.get("name") or isin or concentration.UNKNOWN_ISSUER)
-        issuer = str(issuer_by_isin.get(isin) or name)
+        issuer = concentration.normalize_bond_issuer(
+            issuer_by_isin.get(isin) or name,
+            asset_type,
+        )
         ytm = _to_float(ytm_by_isin.get(isin)) if isin else None
         years_to_maturity = (
             calculate_years_to_maturity(maturity_by_isin.get(isin), as_of_date) if isin else None
@@ -352,7 +355,11 @@ def build_reduce_candidates(
         is_bond = asset_type in bond_asset_types
         isin = str(row.get("isin") or "").strip().upper()
         name = str(row.get("name") or isin or concentration.UNKNOWN_ISSUER)
-        issuer = str(issuer_by_isin.get(isin) or name) if is_bond else str(row.get("name") or name)
+        issuer = (
+            concentration.normalize_bond_issuer(issuer_by_isin.get(isin) or name, asset_type)
+            if is_bond
+            else str(row.get("name") or name)
+        )
         ytm = _to_float(ytm_by_isin.get(isin)) if is_bond and isin else None
         years_to_maturity = (
             calculate_years_to_maturity(maturity_by_isin.get(isin), as_of)

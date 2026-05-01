@@ -30,6 +30,9 @@ class DbMigrationsTests(unittest.TestCase):
             bond_ratings_exists = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bond_ratings'"
             ).fetchone()
+            instrument_fx_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='instrument_fx'"
+            ).fetchone()
             reports_exists = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reports'"
             ).fetchone()
@@ -37,6 +40,7 @@ class DbMigrationsTests(unittest.TestCase):
         self.assertEqual(migrations_count, len(db.SCHEMA_MIGRATIONS))
         self.assertIsNotNone(data_sync_exists)
         self.assertIsNotNone(bond_ratings_exists)
+        self.assertIsNotNone(instrument_fx_exists)
         self.assertIsNotNone(reports_exists)
 
     def test_apply_migrations_is_idempotent(self):
@@ -56,7 +60,8 @@ class DbMigrationsTests(unittest.TestCase):
 
     def test_existing_db_without_schema_migrations_is_supported(self):
         # Эмулируем старую БД без schema_migrations и без data_sync_status.
-        with sqlite3.connect(str(db.DB_PATH)) as conn:
+        conn = sqlite3.connect(str(db.DB_PATH))
+        try:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS reports (
@@ -67,6 +72,8 @@ class DbMigrationsTests(unittest.TestCase):
                 )
                 """
             )
+        finally:
+            conn.close()
 
         db.init_db()
 

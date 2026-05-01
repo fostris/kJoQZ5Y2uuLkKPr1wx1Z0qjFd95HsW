@@ -21,7 +21,9 @@ CONCENTRATION_SEVERITY_THRESHOLDS = (
 SEVERITY_PRIORITY = {"info": 0, "warning": 1, "high": 2, "critical": 3}
 
 BOND_ASSET_TYPES = ("bond_ofz_pd", "bond_ofz_in", "bond_corp")
+OFZ_ASSET_TYPES = ("bond_ofz_pd", "bond_ofz_in")
 CORPORATE_BOND_TYPE = "bond_corp"
+MINFIN_ISSUER = "Минфин РФ"
 UNKNOWN_ISSUER = "Unknown"
 UNKNOWN_SECTOR = "Не указан"
 
@@ -62,6 +64,15 @@ def _resolve_issuer_reference(
     if not issuer_name:
         return None
     return reference_lookup.get(_normalize_text_key(issuer_name))
+
+
+def normalize_bond_issuer(issuer_name: str | None, asset_type: str | None) -> str:
+    """Нормализовать имя эмитента для кредитного риска (ОФЗ + линкеры = Минфин РФ)."""
+    normalized_asset_type = str(asset_type or "").strip()
+    if normalized_asset_type in OFZ_ASSET_TYPES:
+        return MINFIN_ISSUER
+    issuer = str(issuer_name or "").strip()
+    return issuer or UNKNOWN_ISSUER
 
 
 def calculate_position_market_value(position: Mapping[str, Any]) -> float | None:
@@ -148,6 +159,7 @@ def group_bond_positions_by_issuer(
             # Временный fallback: если эмитент недоступен в данных/API, группируем по имени выпуска.
             issuer = str(row.get("name") or row.get("isin") or UNKNOWN_ISSUER)
             fallback_count += 1
+        issuer = normalize_bond_issuer(issuer, str(asset_type or ""))
 
         by_issuer_value[issuer] += market_value
         if isin:
@@ -179,6 +191,38 @@ def group_bond_positions_by_issuer(
 
     results.sort(key=lambda x: x["market_value"], reverse=True)
     return results, fallback_count
+
+
+def group_positions_by_asset_type(
+    positions_with_share: list[Mapping[str, Any]],
+    total_portfolio_value: float,
+) -> list[dict[str, Any]]:
+    """Распределение портфеля по типам активов."""
+    by_type_value: dict[str, float] = defaultdict(float)
+    by_type_count: dict[str, int] = defaultdict(int)
+
+    for row in positions_with_share:
+        market_value = _to_float(row.get("market_value"))
+        if market_value is None or market_value <= 0:
+            continue
+        asset_type = str(row.get("asset_type") or "").strip() or "unknown"
+        by_type_value[asset_type] += market_value
+        by_type_count[asset_type] += 1
+
+    results: list[dict[str, Any]] = []
+    for asset_type, market_value in by_type_value.items():
+        share = (market_value / total_portfolio_value) if total_portfolio_value > 0 else None
+        results.append(
+            {
+                "asset_type": asset_type,
+                "market_value": market_value,
+                "asset_type_share": share,
+                "positions_count": by_type_count.get(asset_type, 0),
+            }
+        )
+
+    results.sort(key=lambda x: x["market_value"], reverse=True)
+    return results
 
 
 def aggregate_issuer_dimension(
@@ -380,6 +424,10 @@ def calculate_concentration_metrics(
         field_name="issuer_group",
         fallback_label=UNKNOWN_ISSUER,
     )
+    asset_type_rows = group_positions_by_asset_type(
+        positions_with_share=position_rows,
+        total_portfolio_value=total_portfolio_value,
+    )
 
     largest_position = None
     for row in position_rows:
@@ -431,4 +479,5 @@ def calculate_concentration_metrics(
         "issuer_fallback_count": issuer_fallback_count,
         "sectors": sector_rows,
         "issuer_groups": issuer_group_rows,
+        "asset_types": asset_type_rows,
     }

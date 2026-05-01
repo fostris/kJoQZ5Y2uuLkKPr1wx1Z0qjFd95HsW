@@ -100,6 +100,7 @@ class DbIntegrationTests(unittest.TestCase):
             "coupon_calendar",
             "bond_maturities",
             "bond_ratings",
+            "instrument_fx",
             "cost_basis",
             "issuer_reference",
             "schema_migrations",
@@ -257,6 +258,27 @@ class DbIntegrationTests(unittest.TestCase):
         self.assertEqual(ratings_map["RU000TEST99"]["rating"], "A+(RU)")
         self.assertEqual(ratings_map["RU000TEST99"]["rating_agency"], "Эксперт РА")
         self.assertEqual(ratings_map["RU000TEST99"]["source_url"], "https://example.test/rating-b")
+
+    def test_instrument_fx_crud_defaults_and_list(self):
+        missing = db.get_instrument_fx("RU000MISSING1")
+        self.assertEqual(missing["currency"], "RUB")
+        self.assertEqual(missing["exposure_type"], "rub")
+
+        db.set_instrument_fx(
+            isin="ru000test99",
+            currency="usd",
+            exposure_type="fx_substitute",
+            note="Замещающая облигация",
+        )
+        row = db.get_instrument_fx("RU000TEST99")
+        self.assertEqual(row["isin"], "RU000TEST99")
+        self.assertEqual(row["currency"], "USD")
+        self.assertEqual(row["exposure_type"], "fx_substitute")
+        self.assertEqual(row["note"], "Замещающая облигация")
+
+        listed = db.list_instrument_fx()
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]["isin"], "RU000TEST99")
 
         db.delete_bond_rating("ru000test99")
         self.assertNotIn("RU000TEST99", db.get_bond_ratings_map())

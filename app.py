@@ -7,7 +7,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, date
+from datetime import date
 from pathlib import Path
 
 from analytics.bonds import calculate_weighted_ytm, calculate_weighted_years_to_maturity
@@ -19,6 +19,11 @@ from analytics.decision_scenarios import (
     build_reduce_candidates,
     get_exclusion_reason_label,
 )
+from analytics.fx_exposure import (
+    ALLOWED_CURRENCIES,
+    ALLOWED_EXPOSURE_TYPES,
+    compute_fx_exposure,
+)
 from analytics.ratings import (
     RATING_BUCKETS,
     RATING_BUCKET_UNRATED,
@@ -29,17 +34,7 @@ import db
 import moex_api
 import parser as bp
 from report_export import build_portfolio_summary_html
-from fire_metrics import (
-    build_contribution_series,
-    build_fire_projection,
-    build_glide_path,
-    calculate_fire_basics,
-    calculate_fire_window_stats,
-    calculate_percentile_bands,
-    calculate_security_mix,
-    get_age_based_target_stocks,
-    simulate_fire_monte_carlo,
-)
+from fire_metrics import build_fire_scenarios
 from formatters import format_rub
 from portfolio_metrics import (
     build_asset_type_aggregation,
@@ -116,6 +111,16 @@ TYPE_COLORS = {
     "stock": "#10b981",
 }
 
+FX_RECOMMENDED_MIN_SHARE = 0.15
+FX_RECOMMENDED_MAX_SHARE = 0.25
+FX_EXPOSURE_LABELS = {
+    "rub": "Рублёвая",
+    "fx_substitute": "Замещайка",
+    "fx_direct": "Прямая FX",
+    "gold": "Золото",
+    "commodity_proxy": "Commodity proxy",
+}
+
 BOND_ASSET_TYPES = concentration.BOND_ASSET_TYPES
 PREMIUM_FILTER_OPTIONS = {
     "all": "Все",
@@ -127,6 +132,31 @@ ATTENTION_NEAR_MATURITY_DAYS = 90
 ATTENTION_LOSS_PCT_THRESHOLD = -10.0
 ATTENTION_LONG_MATURITY_YEARS = 7.0
 ATTENTION_CONCENTRATION_THRESHOLD = 0.10
+REBALANCE_TARGET_PRESETS = {
+    "current_default": {
+        "label": "Текущий дефолт",
+        "targets": dict(REBALANCE_DEFAULT_TARGETS),
+    },
+    "macro_fire_rf": {
+        "label": "Макро/FIRE РФ (ОФЗ-ИН 7%)",
+        "targets": {
+            "bond_ofz_pd": 13.0,
+            "bond_ofz_in": 7.0,
+            "bond_corp": 40.0,
+            "etf": 10.0,
+            "stock": 30.0,
+        },
+    },
+}
+
+try:
+    from fire_metrics import SCENARIO_PRESETS as FIRE_SCENARIO_PRESETS
+except ImportError:
+    FIRE_SCENARIO_PRESETS = {
+        "base": {"label": "Базовый", "inflation_rate": 0.07, "nominal_return_rate": 0.11, "weight": 0.55},
+        "stagflation": {"label": "Стагфляционный", "inflation_rate": 0.10, "nominal_return_rate": 0.11, "weight": 0.20},
+        "optimistic": {"label": "Оптимистичный", "inflation_rate": 0.04, "nominal_return_rate": 0.115, "weight": 0.10},
+    }
 
 
 def fmt(n: float) -> str:
@@ -290,6 +320,17 @@ concentration_metrics = concentration.calculate_concentration_metrics(
     issuer_by_isin=issuer_by_isin,
     issuer_reference_by_name=issuer_reference_map,
 )
+fx_override_rows = db.list_instrument_fx()
+fx_overrides_map = {
+    str(row["isin"]).upper(): {
+        "currency": row["currency"],
+        "exposure_type": row["exposure_type"],
+        "note": row["note"],
+    }
+    for row in fx_override_rows
+    if row["isin"]
+}
+fx_exposure_metrics = compute_fx_exposure(pos_list, fx_overrides_map)
 ytm_metrics = calculate_weighted_ytm(
     positions=pos_list,
     ytm_by_isin=ytm_by_isin,
@@ -788,6 +829,30 @@ with tab_overview:
     else:
         st.info("Недостаточно данных для группировки облигаций по эмитентам.")
 
+    asset_type_rows = concentration_metrics.get("asset_types", [])
+    if asset_type_rows:
+        st.markdown("#### Распределение по типам активов")
+        asset_type_df = pd.DataFrame(asset_type_rows).copy()
+        asset_type_df["Тип актива"] = asset_type_df["asset_type"].map(TYPE_LABELS).fillna(asset_type_df["asset_type"])
+        asset_type_df["Доля портфеля"] = asset_type_df["asset_type_share"].apply(
+            lambda v: v * 100 if v is not None else None
+        )
+        st.dataframe(
+            asset_type_df[["Тип актива", "market_value", "Доля портфеля", "positions_count"]].rename(
+                columns={
+                    "market_value": "Рыночная стоимость",
+                    "positions_count": "Позиций",
+                }
+            ),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Рыночная стоимость": st.column_config.NumberColumn(format="%.2f ₽"),
+                "Доля портфеля": st.column_config.NumberColumn(format="%.2f%%"),
+                "Позиций": st.column_config.NumberColumn(format="%d"),
+            },
+        )
+
     fallback_count = concentration_metrics.get("issuer_fallback_count", 0)
     if fallback_count:
         st.caption(
@@ -933,6 +998,157 @@ with tab_overview:
                 )
         else:
             st.info("Нет данных для расчёта концентрации по группам эмитентов.")
+
+    st.divider()
+    st.subheader("💱 Валютная экспозиция")
+    st.caption(
+        "FX-доля учитывает только `fx_substitute`, `fx_direct`, `gold`. "
+        "`commodity_proxy` показывается отдельно и не входит в основной FX-порог."
+    )
+
+    fx_share = float(fx_exposure_metrics.get("fx_share") or 0.0)
+    rub_share = float(fx_exposure_metrics.get("rub_share") or 0.0)
+    fx_total_value = float(fx_exposure_metrics.get("total_value") or 0.0)
+    fx_cols = st.columns(3)
+    with fx_cols[0]:
+        st.metric("FX-доля", f"{fx_share * 100:.1f}%")
+    with fx_cols[1]:
+        st.metric("Рублёвая доля", f"{rub_share * 100:.1f}%")
+    with fx_cols[2]:
+        st.metric("Объём позиций", f"{fmt(fx_total_value)} ₽")
+
+    if fx_share < FX_RECOMMENDED_MIN_SHARE:
+        st.warning("FX-доля ниже 15%: ниже минимальной диверсификации.")
+    elif fx_share > FX_RECOMMENDED_MAX_SHARE:
+        st.warning("FX-доля выше 25%: выше рекомендуемого диапазона.")
+    else:
+        st.success("FX-доля в рекомендуемом диапазоне 15–25%.")
+
+    by_currency = fx_exposure_metrics.get("by_currency", {})
+    by_exposure_type = fx_exposure_metrics.get("by_exposure_type", {})
+
+    chart_col1, chart_col2 = st.columns(2)
+    with chart_col1:
+        if by_currency:
+            cur_df = pd.DataFrame(
+                [{"currency": key, "value": value} for key, value in by_currency.items()]
+            ).sort_values("value", ascending=False)
+            fig_cur = px.bar(
+                cur_df,
+                x="currency",
+                y="value",
+                text="value",
+                labels={"currency": "Валюта", "value": "Стоимость, ₽"},
+                color="currency",
+            )
+            fig_cur.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+            fig_cur.update_layout(showlegend=False, margin=dict(l=8, r=8, t=24, b=8))
+            st.plotly_chart(fig_cur, use_container_width=True)
+        else:
+            st.info("Нет данных для распределения по валютам.")
+    with chart_col2:
+        if by_exposure_type:
+            exp_df = pd.DataFrame(
+                [{"exposure_type": key, "value": value} for key, value in by_exposure_type.items()]
+            ).sort_values("value", ascending=False)
+            exp_df["exposure_label"] = exp_df["exposure_type"].map(FX_EXPOSURE_LABELS).fillna(exp_df["exposure_type"])
+            fig_exp = px.bar(
+                exp_df,
+                x="exposure_label",
+                y="value",
+                text="value",
+                labels={"exposure_label": "Тип экспозиции", "value": "Стоимость, ₽"},
+                color="exposure_label",
+            )
+            fig_exp.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+            fig_exp.update_layout(showlegend=False, margin=dict(l=8, r=8, t=24, b=8))
+            st.plotly_chart(fig_exp, use_container_width=True)
+        else:
+            st.info("Нет данных для распределения по типам экспозиции.")
+
+    fx_rows = fx_exposure_metrics.get("rows", [])
+    if fx_rows:
+        fx_rows_df = pd.DataFrame(fx_rows).copy()
+        fx_rows_df["Тип экспозиции"] = fx_rows_df["exposure_type"].map(FX_EXPOSURE_LABELS).fillna(
+            fx_rows_df["exposure_type"]
+        )
+        st.dataframe(
+            fx_rows_df[["name", "isin", "value", "currency", "Тип экспозиции"]].rename(
+                columns={
+                    "name": "Инструмент",
+                    "isin": "ISIN",
+                    "value": "Стоимость, ₽",
+                    "currency": "Валюта",
+                }
+            ),
+            hide_index=True,
+            use_container_width=True,
+            column_config={"Стоимость, ₽": st.column_config.NumberColumn(format="%.2f ₽")},
+        )
+
+    with st.expander("⚙️ Настройка валютной экспозиции по ISIN"):
+        portfolio_fx_rows = []
+        for row in pos_list:
+            isin = str(row.get("isin") or "").strip().upper()
+            if not isin:
+                continue
+            fx_meta = fx_overrides_map.get(
+                isin,
+                {"currency": "RUB", "exposure_type": "rub", "note": ""},
+            )
+            portfolio_fx_rows.append(
+                {
+                    "isin": isin,
+                    "name": str(row.get("name") or ""),
+                    "currency": fx_meta.get("currency", "RUB"),
+                    "exposure_type": fx_meta.get("exposure_type", "rub"),
+                    "note": fx_meta.get("note", ""),
+                }
+            )
+
+        if portfolio_fx_rows:
+            fx_editor_df = (
+                pd.DataFrame(portfolio_fx_rows)
+                .drop_duplicates(subset=["isin"], keep="first")
+                .sort_values(by=["name", "isin"])
+                .reset_index(drop=True)
+            )
+
+            edited_fx_df = st.data_editor(
+                fx_editor_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "isin": st.column_config.TextColumn("ISIN", disabled=True),
+                    "name": st.column_config.TextColumn("Инструмент", disabled=True),
+                    "currency": st.column_config.SelectboxColumn(
+                        "Валюта",
+                        options=sorted(ALLOWED_CURRENCIES),
+                    ),
+                    "exposure_type": st.column_config.SelectboxColumn(
+                        "Тип экспозиции",
+                        options=sorted(ALLOWED_EXPOSURE_TYPES),
+                    ),
+                    "note": st.column_config.TextColumn("Комментарий"),
+                },
+                key="fx_exposure_editor",
+            )
+
+            if st.button("💾 Сохранить FX-справочник", key="save_fx_overrides", type="primary"):
+                for _, fx_row in edited_fx_df.iterrows():
+                    isin = str(fx_row.get("isin") or "").strip().upper()
+                    if not isin:
+                        continue
+                    db.set_instrument_fx(
+                        isin=isin,
+                        currency=str(fx_row.get("currency") or "RUB"),
+                        exposure_type=str(fx_row.get("exposure_type") or "rub"),
+                        note=str(fx_row.get("note") or ""),
+                    )
+                st.success("FX-справочник обновлён.")
+                st.rerun()
+        else:
+            st.info("В портфеле нет позиций с ISIN для настройки FX-экспозиции.")
 
     st.markdown("#### 🗂 Справочник эмитентов")
     issuer_reference_rows = db.get_issuer_references()
@@ -2396,6 +2612,21 @@ with tab_rebalance:
         st.markdown("### Целевое распределение")
         st.caption("Укажите желаемую долю каждого типа актива. Сумма должна быть 100%.")
 
+        preset_col1, preset_col2 = st.columns([2, 1])
+        with preset_col1:
+            preset_key = st.selectbox(
+                "Пресет целевых долей",
+                options=list(REBALANCE_TARGET_PRESETS.keys()),
+                format_func=lambda key: REBALANCE_TARGET_PRESETS[key]["label"],
+                key="rebalance_preset_key",
+            )
+        with preset_col2:
+            if st.button("Применить пресет", use_container_width=True):
+                preset_targets = REBALANCE_TARGET_PRESETS[preset_key]["targets"]
+                for atype, value in preset_targets.items():
+                    st.session_state[f"target_{atype}"] = float(value)
+                st.success("Пресет применён к форме.")
+
         # Форма настройки целей
         target_cols = st.columns(len(TYPE_LABELS))
         new_targets = {}
@@ -2910,206 +3141,219 @@ with tab_trades:
 # ─── TAB: FIRE ───
 with tab_fire:
     st.subheader("🔥 FIRE-трекер")
+    broker_portfolio = float(selected_report["total_end"] or 0.0)
+    external_assets_total = float(db.get_fire_assets_total() or 0.0)
+    default_current_capital = broker_portfolio + external_assets_total
 
-    # ─── Параметры (настраиваемые) ───
-    with st.expander("⚙️ Параметры FIRE-плана", expanded=False):
-        pcol1, pcol2, pcol3 = st.columns(3)
-        with pcol1:
-            fire_age = st.number_input("Текущий возраст", value=25, min_value=18, max_value=65)
-            fire_target_age_min = st.number_input("Целевой возраст FIRE (от)", value=40, min_value=25, max_value=70)
-            fire_target_age_max = st.number_input("Целевой возраст FIRE (до)", value=44, min_value=25, max_value=70)
-            fire_life_expectancy = st.number_input("Горизонт планирования (до возраста)", value=85, min_value=50, max_value=100)
-        with pcol2:
-            fire_monthly_expenses = st.number_input("Целевые расходы, ₽/мес", value=80_000, step=5_000)
-            fire_withdrawal_rate = st.number_input("Ставка изъятия, %", value=3.5, step=0.1, min_value=1.0, max_value=10.0)
-            fire_inflation = st.number_input("Инфляция, %", value=6.0, step=0.5, min_value=0.0, max_value=20.0)
-        with pcol3:
-            fire_monthly_contrib = st.number_input("Пополнение, ₽/мес", value=20_000, step=1_000)
-            fire_contrib_growth = st.number_input("Рост пополнений, %/год", value=5.0, step=1.0, min_value=0.0, max_value=30.0)
-            fire_return_nominal = st.number_input("Ожид. доходность (номинал.), %", value=12.0, step=0.5, min_value=0.0, max_value=30.0)
+    if "fire_official_inflation_pct" not in st.session_state:
+        st.session_state["fire_official_inflation_pct"] = 7.0
+    if "fire_personal_inflation_pct" not in st.session_state:
+        st.session_state["fire_personal_inflation_pct"] = st.session_state["fire_official_inflation_pct"] + 2.0
 
-    # Текущий портфель (брокерский) + внешние активы
-    broker_portfolio = selected_report["total_end"]
-    external_assets_total = db.get_fire_assets_total()
-    fire_basics = calculate_fire_basics(
-        fire_return_nominal=fire_return_nominal,
-        fire_inflation=fire_inflation,
-        fire_monthly_expenses=fire_monthly_expenses,
-        fire_withdrawal_rate=fire_withdrawal_rate,
-        broker_portfolio=broker_portfolio,
-        external_assets_total=external_assets_total,
-        fire_age=fire_age,
-        fire_target_age_min=fire_target_age_min,
+    pcol1, pcol2, pcol3 = st.columns(3)
+    with pcol1:
+        current_capital_input = st.number_input(
+            "Текущий капитал, ₽",
+            value=float(default_current_capital),
+            step=10_000.0,
+            min_value=0.0,
+            help="Автоподстановка: брокерский портфель + внешние активы FIRE.",
+        )
+        monthly_contribution = st.number_input(
+            "Ежемесячное пополнение, ₽",
+            value=20_000.0,
+            step=1_000.0,
+            min_value=0.0,
+        )
+    with pcol2:
+        monthly_target_expense = st.number_input(
+            "Целевые траты, ₽/мес",
+            value=80_000.0,
+            step=5_000.0,
+            min_value=0.0,
+        )
+        horizon_years = int(
+            st.number_input("Горизонт, лет", value=30, min_value=1, max_value=80, step=1)
+        )
+    with pcol3:
+        official_inflation_pct = st.number_input(
+            "Официальная инфляция, %",
+            key="fire_official_inflation_pct",
+            step=0.1,
+            min_value=0.0,
+            max_value=25.0,
+        )
+        personal_inflation_pct = st.number_input(
+            "Личная инфляция, %",
+            key="fire_personal_inflation_pct",
+            step=0.1,
+            min_value=0.0,
+            max_value=30.0,
+            help=(
+                "На горизонте 25 лет разница между 6% и 8% инфляции — кратная разница "
+                "в целевом капитале. Услуги и продукты растут быстрее средней корзины Росстата."
+            ),
+        )
+
+    swr_col1, swr_col2 = st.columns(2)
+    with swr_col1:
+        swr_target_pct = st.number_input(
+            "SWR target, %",
+            value=3.0,
+            step=0.1,
+            min_value=1.0,
+            max_value=10.0,
+        )
+    with swr_col2:
+        swr_withdrawal_pct = st.number_input(
+            "SWR withdrawal, %",
+            value=3.5,
+            step=0.1,
+            min_value=1.0,
+            max_value=10.0,
+        )
+
+    st.caption(
+        f"Портфель брокера: {fmt(broker_portfolio)} ₽ · внешние активы: {fmt(external_assets_total)} ₽."
     )
-    fire_return_real = fire_basics["fire_return_real"]
-    fire_annual_expenses = fire_basics["fire_annual_expenses"]
-    fire_target = fire_basics["fire_target"]
-    current_portfolio = fire_basics["current_portfolio"]
-    progress_pct = fire_basics["progress_pct"]
-    years_to_fire = fire_basics["years_to_fire"]
 
-    # ─── KPI ───
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        if external_assets_total > 0:
-            st.metric("Всего активов", f"{current_portfolio:,.0f} ₽",
-                      f"брокер {fmt(broker_portfolio)} + внешние {fmt(external_assets_total)}")
-        else:
-            st.metric("Текущий портфель", f"{current_portfolio:,.0f} ₽")
-    with c2:
-        st.metric("Цель FIRE", f"{fire_target:,.0f} ₽",
-                  f"{fire_monthly_expenses:,.0f} ₽/мес × 12 / {fire_withdrawal_rate}%")
-    with c3:
-        st.metric("Прогресс", f"{progress_pct:.1%}",
-                  f"осталось {fmt(fire_target - current_portfolio)} ₽")
-    with c4:
-        st.metric("Лет до цели", f"{years_to_fire}",
-                  f"возраст {fire_target_age_min}–{fire_target_age_max}")
+    with st.expander("Параметры сценариев", expanded=False):
+        scenario_columns = st.columns(3)
+        scenario_input_presets = {}
+        for idx, scenario_key in enumerate(["base", "stagflation", "optimistic"]):
+            preset = FIRE_SCENARIO_PRESETS[scenario_key]
+            with scenario_columns[idx]:
+                st.markdown(f"**{preset['label']}**")
+                default_inflation = preset["inflation_rate"] * 100
+                if scenario_key == "base":
+                    default_inflation = float(personal_inflation_pct)
+                inflation_pct = st.number_input(
+                    "Личная инфляция, %",
+                    value=float(default_inflation),
+                    step=0.1,
+                    min_value=0.0,
+                    max_value=30.0,
+                    key=f"fire_{scenario_key}_inflation_pct",
+                )
+                nominal_pct = st.number_input(
+                    "Номинальная доходность, %",
+                    value=float(preset["nominal_return_rate"] * 100),
+                    step=0.1,
+                    min_value=0.0,
+                    max_value=40.0,
+                    key=f"fire_{scenario_key}_nominal_pct",
+                )
+                delta_pp = inflation_pct - float(official_inflation_pct)
+                st.caption(f"(официальная + {delta_pp:+.1f} п.п.)")
 
-    # Прогресс-бар
-    st.progress(progress_pct, text=f"Накоплено {progress_pct:.1%} от цели FIRE ({fmt(current_portfolio)} из {fmt(fire_target)} ₽)")
+                scenario_input_presets[scenario_key] = {
+                    "label": preset["label"],
+                    "inflation_rate": inflation_pct / 100.0,
+                    "nominal_return_rate": nominal_pct / 100.0,
+                    "weight": float(preset.get("weight", 0.0)),
+                }
+
+    fire_scenarios = build_fire_scenarios(
+        current_capital=float(current_capital_input),
+        monthly_contribution=float(monthly_contribution),
+        monthly_target_expense=float(monthly_target_expense),
+        swr_target=float(swr_target_pct) / 100.0,
+        swr_withdrawal=float(swr_withdrawal_pct) / 100.0,
+        horizon_years=horizon_years,
+        presets=scenario_input_presets,
+    )
+
+    scenario_results = fire_scenarios["scenarios"]
+    scenario_presets = fire_scenarios["presets"]
 
     st.divider()
+    result_cols = st.columns(3)
+    for idx, scenario_key in enumerate(["base", "stagflation", "optimistic"]):
+        scenario = scenario_results.get(scenario_key, {})
+        preset = scenario_presets.get(scenario_key, {})
+        years_to_target = scenario.get("years_to_fire_swr_target")
+        years_to_withdrawal = scenario.get("years_to_fire_swr_withdrawal")
 
-    # ─── Прогноз накоплений ───
-    st.subheader("📈 Прогноз накоплений")
+        with result_cols[idx]:
+            st.markdown(f"### {preset.get('label', scenario_key)}")
+            st.metric(
+                f"Цель капитала (SWR {swr_target_pct:.1f}%)",
+                f"{scenario.get('target_capital_swr_target_real', 0.0):,.0f} ₽",
+            )
+            st.metric(
+                f"Опер. изъятие (SWR {swr_withdrawal_pct:.1f}%)",
+                f"{scenario.get('target_capital_swr_withdrawal_real', 0.0):,.0f} ₽",
+            )
+            st.metric(
+                "Годы до FIRE (SWR target)",
+                "не достигается"
+                if years_to_target is None
+                else f"{years_to_target:.1f}",
+                f"горизонт {horizon_years} лет",
+            )
+            st.metric(
+                "Годы до FIRE (SWR withdrawal)",
+                "не достигается"
+                if years_to_withdrawal is None
+                else f"{years_to_withdrawal:.1f}",
+            )
+            st.metric(
+                "Реальная доходность",
+                f"{(scenario.get('real_return_rate', 0.0) * 100):.2f}%",
+            )
 
-    proj_df, fire_reached_age = build_fire_projection(
-        current_portfolio=current_portfolio,
-        fire_age=fire_age,
-        fire_life_expectancy=fire_life_expectancy,
-        fire_monthly_contrib=fire_monthly_contrib,
-        fire_contrib_growth=fire_contrib_growth,
-        fire_return_nominal=fire_return_nominal,
-        fire_inflation=fire_inflation,
-        fire_target=fire_target,
-    )
-
-    # ─── График номинальный ───
+    st.divider()
+    st.subheader("📈 Траектория капитала (реальные рубли)")
     fig_fire = go.Figure()
+    scenario_colors = {
+        "base": "#22d3ee",
+        "stagflation": "#ef4444",
+        "optimistic": "#10b981",
+    }
 
-    # Портфель (номинал)
-    fig_fire.add_trace(go.Scatter(
-        x=proj_df["Возраст"],
-        y=proj_df["Портфель"],
-        mode="lines",
-        name="Портфель (номинал.)",
-        line=dict(color="#22d3ee", width=2.5),
-        fill="tozeroy",
-        fillcolor="rgba(34,211,238,0.08)",
-    ))
+    for scenario_key in ["base", "stagflation", "optimistic"]:
+        scenario = scenario_results.get(scenario_key, {})
+        preset = scenario_presets.get(scenario_key, {})
+        trajectory = scenario.get("trajectory", [])
+        if not trajectory:
+            continue
+        traj_df = pd.DataFrame(trajectory)
+        fig_fire.add_trace(
+            go.Scatter(
+                x=traj_df["year"],
+                y=traj_df["capital_real"],
+                mode="lines",
+                name=preset.get("label", scenario_key),
+                line=dict(color=scenario_colors.get(scenario_key, "#94a3b8"), width=2.5),
+            )
+        )
 
-    # Портфель (реальный)
-    fig_fire.add_trace(go.Scatter(
-        x=proj_df["Возраст"],
-        y=proj_df["Портфель (реальн.)"],
-        mode="lines",
-        name="Портфель (реальн.)",
-        line=dict(color="#10b981", width=2.5),
-        fill="tozeroy",
-        fillcolor="rgba(16,185,129,0.08)",
-    ))
-
-    # Цель FIRE (реальная — горизонтальная линия)
-    fig_fire.add_trace(go.Scatter(
-        x=proj_df["Возраст"],
-        y=proj_df["Цель FIRE (реальн.)"],
-        mode="lines",
-        name=f"Цель FIRE ({fmt(fire_target)} ₽)",
-        line=dict(color="#ef4444", width=2, dash="dash"),
-    ))
-
-    # Зона FIRE (40-44)
-    fig_fire.add_vrect(
-        x0=fire_target_age_min, x1=fire_target_age_max,
-        fillcolor="rgba(245,158,11,0.1)",
-        line_width=0,
-        annotation_text="FIRE окно",
-        annotation_position="top",
-    )
-
-    # Точка текущего возраста
-    fig_fire.add_vline(
-        x=fire_age,
-        line_dash="dot",
-        line_color="#64748b",
-        annotation_text="Сейчас",
-        annotation_position="top",
-    )
-
-    # Точка достижения FIRE
-    if fire_reached_age and fire_reached_age <= fire_life_expectancy:
-        fire_row = proj_df[proj_df["Возраст"] == fire_reached_age].iloc[0]
-        fig_fire.add_trace(go.Scatter(
-            x=[fire_reached_age],
-            y=[fire_row["Портфель (реальн.)"]],
-            mode="markers+text",
-            name=f"FIRE в {fire_reached_age} лет",
-            marker=dict(color="#f59e0b", size=14, symbol="star"),
-            text=[f"🔥 FIRE в {fire_reached_age}"],
-            textposition="top center",
-            textfont=dict(size=13),
-        ))
+    reference_scenario = scenario_results.get("base", {})
+    fire_target_line = reference_scenario.get("target_capital_swr_target_real")
+    if fire_target_line is not None:
+        fig_fire.add_hline(
+            y=fire_target_line,
+            line_dash="dash",
+            line_color="#f59e0b",
+            annotation_text=f"Цель SWR target: {fire_target_line:,.0f} ₽",
+            annotation_position="top left",
+        )
 
     fig_fire.update_layout(
-        xaxis_title="Возраст",
-        yaxis_title="₽",
-        height=450,
-        margin=dict(t=40, b=40),
+        xaxis_title="Год прогноза",
+        yaxis_title="Реальный капитал, ₽",
+        height=420,
+        margin=dict(t=30, b=30),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", y=1.12),
+        legend=dict(orientation="h", y=1.1),
         hovermode="x unified",
     )
     st.plotly_chart(fig_fire, use_container_width=True)
-
-    # ─── Результат прогноза ───
-    st.divider()
-
-    if fire_reached_age:
-        years_until = fire_reached_age - fire_age
-        fire_year = datetime.now().year + years_until
-        st.markdown(f"""
-        <div class="iis-reminder" style="border-color: #f59e0b; background: linear-gradient(135deg, #422006 0%, #111827 100%);">
-            <h3 style="margin:0; color: #f59e0b;">🔥 FIRE достижим в {fire_reached_age} лет ({fire_year} год)</h3>
-            <p style="margin: 8px 0 0; color: #e2e8f0;">
-                При текущих параметрах через <b>{years_until} лет</b> реальная стоимость портфеля
-                достигнет <b>{fmt(fire_target)} ₽</b> (в сегодняшних ценах),
-                что обеспечит пассивный доход <b>{fmt(fire_monthly_expenses)} ₽/мес</b>
-                при ставке изъятия {fire_withdrawal_rate}%.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.error(
-            f"⚠️ При текущих параметрах FIRE не достигается до {fire_life_expectancy} лет. "
-            "Попробуйте увеличить пополнения или снизить целевые расходы."
-        )
-
-    # ─── Таблица по годам ───
-    with st.expander("📋 Прогноз по годам (детально)"):
-        detail_df = proj_df.copy()
-        detail_df["Пополнения/мес"] = build_contribution_series(
-            initial_monthly=fire_monthly_contrib,
-            growth_pct=fire_contrib_growth,
-            periods=len(detail_df),
-        )
-
-        st.dataframe(
-            detail_df[["Год", "Возраст", "Портфель", "Портфель (реальн.)", "Пополнения/мес"]].rename(columns={
-                "Портфель": "Портфель (номинал.) ₽",
-                "Портфель (реальн.)": "Портфель (реальн.) ₽",
-                "Пополнения/мес": "Взнос/мес ₽",
-            }),
-            hide_index=True,
-            use_container_width=True,
-            height=500,
-            column_config={
-                "Портфель (номинал.) ₽": st.column_config.NumberColumn(format="%.0f ₽"),
-                "Портфель (реальн.) ₽": st.column_config.NumberColumn(format="%.0f ₽"),
-                "Взнос/мес ₽": st.column_config.NumberColumn(format="%.0f ₽"),
-            },
-        )
+    st.caption(
+        "Все суммы — в реальных рублях (с поправкой на инфляцию). "
+        "Целевой капитал считается по SWR target; оперативное изъятие — по SWR withdrawal."
+    )
 
     # ─── Внешние активы ───
     st.divider()
@@ -3194,312 +3438,6 @@ with tab_fire:
                 st.rerun()
             else:
                 st.warning("Укажите название и сумму")
-
-    # ─── Глайд-пат ───
-    st.divider()
-    st.subheader("⚖️ Глайд-пат (распределение активов)")
-
-    # Текущее распределение из портфеля
-    security_mix = calculate_security_mix(pos_df)
-    if security_mix["total_sec"] > 0:
-        bonds_value = security_mix["bonds_value"]
-        stocks_value = security_mix["stocks_value"]
-        etf_value = security_mix["etf_value"]
-        bonds_pct = security_mix["bonds_pct"]
-        stocks_pct = security_mix["stocks_pct"]
-
-        if bonds_pct is not None and stocks_pct is not None:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.metric("Облигации", f"{bonds_pct:.1f}%", f"{fmt(bonds_value)} ₽")
-            with c2:
-                st.metric("Акции + ETF", f"{stocks_pct:.1f}%", f"{fmt(stocks_value + etf_value)} ₽")
-            with c3:
-                target_stocks = get_age_based_target_stocks(fire_age)
-                target_bonds = 100 - target_stocks
-                st.metric("Целевое (акции/облиг.)",
-                          f"{target_stocks}/{target_bonds}",
-                          "по глайд-пату")
-
-            # Визуализация глайд-пата
-            glide_ages = list(range(25, 71))
-            glide_stocks, glide_bonds = build_glide_path(glide_ages)
-
-            fig_glide = go.Figure()
-            fig_glide.add_trace(go.Scatter(
-                x=glide_ages, y=glide_stocks,
-                mode="lines",
-                name="Акции %",
-                line=dict(color="#10b981", width=2),
-                fill="tozeroy",
-                fillcolor="rgba(16,185,129,0.15)",
-                stackgroup="one",
-            ))
-            fig_glide.add_trace(go.Scatter(
-                x=glide_ages, y=glide_bonds,
-                mode="lines",
-                name="Облигации %",
-                line=dict(color="#a78bfa", width=2),
-                fill="tonexty",
-                fillcolor="rgba(167,139,250,0.15)",
-                stackgroup="one",
-            ))
-
-            # Текущий возраст
-            fig_glide.add_vline(
-                x=fire_age, line_dash="dot", line_color="#f59e0b",
-                annotation_text=f"Сейчас ({fire_age})",
-            )
-
-            fig_glide.update_layout(
-                xaxis_title="Возраст",
-                yaxis_title="%",
-                yaxis_range=[0, 100],
-                height=300,
-                margin=dict(t=20, b=40),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                legend=dict(orientation="h", y=1.1),
-            )
-            st.plotly_chart(fig_glide, use_container_width=True)
-
-    # ─── Стресс-тест FIRE (Monte Carlo) ───
-    st.divider()
-    st.subheader("🎲 Стресс-тест FIRE (Monte Carlo)")
-    st.caption(
-        "Симуляция случайных сценариев доходности портфеля. "
-        "Вместо фиксированной доходности — разброс от кризисных до бычьих лет."
-    )
-
-    with st.expander("⚙️ Параметры симуляции", expanded=False):
-        mc_col1, mc_col2 = st.columns(2)
-        with mc_col1:
-            mc_simulations = st.number_input(
-                "Количество сценариев", value=500, min_value=50, max_value=5000, step=50,
-                help="Больше = точнее, но медленнее"
-            )
-            mc_volatility = st.number_input(
-                "Волатильность (σ), %", value=15.0, step=1.0, min_value=1.0, max_value=50.0,
-                help="Стандартное отклонение годовой доходности. РФ рынок ~15–25%"
-            )
-        with mc_col2:
-            mc_crash_prob = st.number_input(
-                "Вероятность кризиса, %/год", value=5.0, step=1.0, min_value=0.0, max_value=30.0,
-                help="Шанс просадки -30...-50% в отдельный год"
-            )
-            mc_crash_severity = st.number_input(
-                "Глубина кризиса, %", value=-40.0, step=5.0, min_value=-80.0, max_value=-10.0,
-                help="Средняя просадка в кризисный год"
-            )
-
-    if st.button("🚀 Запустить симуляцию", type="primary"):
-        progress_bar = st.progress(0, text="Симуляция...")
-        mc_result = simulate_fire_monte_carlo(
-            current_portfolio=current_portfolio,
-            fire_age=fire_age,
-            fire_target_age_max=fire_target_age_max,
-            fire_monthly_contrib=fire_monthly_contrib,
-            fire_contrib_growth=fire_contrib_growth,
-            fire_return_nominal=fire_return_nominal,
-            fire_inflation=fire_inflation,
-            fire_target=fire_target,
-            mc_simulations=int(mc_simulations),
-            mc_volatility=mc_volatility,
-            mc_crash_prob=mc_crash_prob,
-            mc_crash_severity=mc_crash_severity,
-            random_seed=42,
-        )
-        years_sim = mc_result["years_sim"]
-        all_paths = mc_result["all_paths"]
-        fire_ages_mc = mc_result["fire_ages_mc"]
-        fire_prob = mc_result["fire_prob"]
-
-        progress_bar.progress(1.0, text="Готово!")
-
-        # ─── Результаты ───
-        rc1, rc2, rc3, rc4 = st.columns(4)
-        with rc1:
-            color = "#10b981" if fire_prob >= 70 else "#f59e0b" if fire_prob >= 40 else "#ef4444"
-            st.markdown(f"""
-            <div style="text-align:center; padding:16px; background:#111827; border-radius:12px; border: 2px solid {color};">
-                <div style="color:#64748b; font-size:12px; font-weight:600; text-transform:uppercase;">Вероятность FIRE</div>
-                <div style="color:{color}; font-size:36px; font-weight:700; font-family:monospace;">{fire_prob:.0f}%</div>
-                <div style="color:#64748b; font-size:11px;">до {fire_target_age_max} лет</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with rc2:
-            if fire_ages_mc:
-                median_age = sorted(fire_ages_mc)[len(fire_ages_mc) // 2]
-                st.metric("Медианный возраст FIRE", f"{median_age} лет",
-                          f"{median_age - fire_age} лет от сейчас")
-            else:
-                st.metric("Медианный возраст FIRE", "—", "Не достигается")
-        with rc3:
-            if fire_ages_mc:
-                best_case = min(fire_ages_mc)
-                st.metric("Лучший сценарий", f"{best_case} лет", "🟢 оптимист")
-            else:
-                st.metric("Лучший сценарий", "—")
-        with rc4:
-            if fire_ages_mc:
-                worst_case = max(fire_ages_mc)
-                st.metric("Худший (из успешных)", f"{worst_case} лет", "🔴 пессимист")
-            else:
-                st.metric("Худший сценарий", "—")
-
-        st.divider()
-
-        # ─── График веера сценариев ───
-
-        ages_axis = list(range(fire_age, fire_age + years_sim + 1))
-
-        # Считаем перцентили
-        percentile_bands = calculate_percentile_bands(all_paths, years_sim + 1)
-        p5 = percentile_bands["p5"]
-        p25 = percentile_bands["p25"]
-        p50 = percentile_bands["p50"]
-        p75 = percentile_bands["p75"]
-        p95 = percentile_bands["p95"]
-        axis_len = min(len(ages_axis), len(p50))
-        ages_axis = ages_axis[:axis_len]
-        p5 = p5[:axis_len]
-        p25 = p25[:axis_len]
-        p50 = p50[:axis_len]
-        p75 = p75[:axis_len]
-        p95 = p95[:axis_len]
-
-        fig_mc = go.Figure()
-
-        # 5-95 перцентиль (широкий веер)
-        fig_mc.add_trace(go.Scatter(
-            x=ages_axis, y=p95,
-            mode="lines", line=dict(width=0),
-            showlegend=False,
-        ))
-        fig_mc.add_trace(go.Scatter(
-            x=ages_axis, y=p5,
-            mode="lines", line=dict(width=0),
-            fill="tonexty",
-            fillcolor="rgba(34,211,238,0.08)",
-            name="5–95 перцентиль",
-        ))
-
-        # 25-75 перцентиль (узкий веер)
-        fig_mc.add_trace(go.Scatter(
-            x=ages_axis, y=p75,
-            mode="lines", line=dict(width=0),
-            showlegend=False,
-        ))
-        fig_mc.add_trace(go.Scatter(
-            x=ages_axis, y=p25,
-            mode="lines", line=dict(width=0),
-            fill="tonexty",
-            fillcolor="rgba(34,211,238,0.15)",
-            name="25–75 перцентиль",
-        ))
-
-        # Медиана
-        fig_mc.add_trace(go.Scatter(
-            x=ages_axis, y=p50,
-            mode="lines",
-            name="Медиана (50%)",
-            line=dict(color="#22d3ee", width=2.5),
-        ))
-
-        # Цель FIRE
-        fig_mc.add_hline(
-            y=fire_target,
-            line_dash="dash",
-            line_color="#ef4444",
-            annotation_text=f"Цель: {fire_target:,.0f} ₽",
-            annotation_position="top right",
-        )
-
-        # FIRE окно
-        fig_mc.add_vrect(
-            x0=fire_target_age_min, x1=fire_target_age_max,
-            fillcolor="rgba(245,158,11,0.08)",
-            line_width=0,
-            annotation_text="FIRE окно",
-            annotation_position="top",
-        )
-
-        fig_mc.update_layout(
-            xaxis_title="Возраст",
-            yaxis_title="Реальная стоимость портфеля, ₽",
-            height=450,
-            margin=dict(t=40, b=40),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            legend=dict(orientation="h", y=1.12),
-            hovermode="x unified",
-        )
-        st.plotly_chart(fig_mc, use_container_width=True)
-
-        # ─── Распределение возраста FIRE ───
-        if fire_ages_mc:
-            st.divider()
-            st.subheader("📊 Распределение возраста достижения FIRE")
-
-            fig_hist = go.Figure()
-            fig_hist.add_trace(go.Histogram(
-                x=fire_ages_mc,
-                nbinsx=max(10, (max(fire_ages_mc) - min(fire_ages_mc))),
-                marker_color="#22d3ee",
-                opacity=0.8,
-            ))
-
-            # Медиана
-            median_age = sorted(fire_ages_mc)[len(fire_ages_mc) // 2]
-            fig_hist.add_vline(
-                x=median_age, line_dash="dash", line_color="#f59e0b",
-                annotation_text=f"Медиана: {median_age}",
-            )
-
-            # FIRE окно
-            fig_hist.add_vrect(
-                x0=fire_target_age_min, x1=fire_target_age_max,
-                fillcolor="rgba(16,185,129,0.1)",
-                line_width=1,
-                line_color="#10b981",
-                annotation_text="Целевое окно",
-            )
-
-            fig_hist.update_layout(
-                xaxis_title="Возраст достижения FIRE",
-                yaxis_title="Количество сценариев",
-                height=300,
-                margin=dict(t=30, b=40),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(fig_hist, use_container_width=True)
-
-            # Вероятность по окнам
-            window_stats = calculate_fire_window_stats(
-                fire_ages_mc=fire_ages_mc,
-                fire_target_age_min=fire_target_age_min,
-                fire_target_age_max=fire_target_age_max,
-                mc_simulations=int(mc_simulations),
-            )
-            in_window = window_stats["in_window"]
-            before_window = window_stats["before_window"]
-            after_window = window_stats["after_window"]
-            never = window_stats["never"]
-
-            wc1, wc2, wc3, wc4 = st.columns(4)
-            with wc1:
-                st.metric(f"До {fire_target_age_min} лет", f"{before_window / mc_simulations * 100:.1f}%",
-                          f"{before_window} сценариев")
-            with wc2:
-                st.metric(f"{fire_target_age_min}–{fire_target_age_max} лет", f"{in_window / mc_simulations * 100:.1f}%",
-                          f"{in_window} сценариев")
-            with wc3:
-                st.metric(f"После {fire_target_age_max} лет", f"{after_window / mc_simulations * 100:.1f}%",
-                          f"{after_window} сценариев")
-            with wc4:
-                st.metric("Не достигается", f"{never / mc_simulations * 100:.1f}%",
-                          f"{int(never)} сценариев")
 
 
 # ─── Футер ───
