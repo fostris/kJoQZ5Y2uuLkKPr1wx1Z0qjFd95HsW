@@ -10,8 +10,17 @@ import plotly.graph_objects as go
 from datetime import date
 from pathlib import Path
 
-from analytics.bonds import calculate_weighted_ytm, calculate_weighted_years_to_maturity
-from analytics.cashflows import build_coupon_cashflow_by_month, build_maturity_ladder
+from analytics.bonds import (
+    calculate_weighted_ytm,
+    calculate_weighted_years_to_maturity,
+    compute_portfolio_duration,
+    compute_weighted_ytm,
+)
+from analytics.cashflows import (
+    build_12m_cashflow_forecast,
+    build_coupon_cashflow_by_month,
+    build_maturity_ladder,
+)
 from analytics.alerts import build_alerts, get_rule_label
 from analytics.data_quality import build_bond_data_quality_report
 from analytics.decision_scenarios import (
@@ -334,6 +343,7 @@ rating_by_isin = {
 maturities = db.get_bond_maturities()
 coupon_calendar = db.get_coupon_calendar()
 bond_amortizations = db.get_bond_amortizations()
+dividend_calendar = db.get_dividend_calendar()
 cost_basis_all = db.get_cost_basis_map()
 maturity_by_isin = {
     row["isin"]: row["maturity_date"]
@@ -394,6 +404,89 @@ maturity_ladder_report = build_maturity_ladder(
     amortizations=[dict(row) for row in bond_amortizations],
     as_of_date=date.today(),
 )
+
+coupon_schedule_by_isin = {}
+for row in coupon_calendar:
+    item = dict(row)
+    isin = str(item.get("isin") or "").strip().upper()
+    if not isin:
+        continue
+    coupon_schedule_by_isin.setdefault(isin, []).append(item)
+
+amortization_schedule_by_isin = {}
+for row in bond_amortizations:
+    item = dict(row)
+    isin = str(item.get("isin") or "").strip().upper()
+    if not isin:
+        continue
+    amortization_schedule_by_isin.setdefault(isin, []).append(item)
+
+dividend_schedule_by_isin = {}
+for row in dividend_calendar:
+    item = dict(row)
+    isin = str(item.get("isin") or "").strip().upper()
+    if not isin:
+        continue
+    dividend_schedule_by_isin.setdefault(isin, []).append(item)
+
+
+def _build_coupon_sync_breakdown(positions_rows, coupons_rows, as_of: date) -> dict[str, int]:
+    as_of_iso = as_of.isoformat()
+    ofz_isins = {
+        str(row.get("isin") or "").strip().upper()
+        for row in positions_rows
+        if str(row.get("asset_type") or "") in {"bond_ofz_pd", "bond_ofz_in"}
+        and str(row.get("isin") or "").strip()
+    }
+    corp_isins = {
+        str(row.get("isin") or "").strip().upper()
+        for row in positions_rows
+        if str(row.get("asset_type") or "") == "bond_corp"
+        and str(row.get("isin") or "").strip()
+    }
+    stats = {
+        "ofz_bonds": len(ofz_isins),
+        "corp_bonds": len(corp_isins),
+        "ofz_coupons": 0,
+        "corp_coupons": 0,
+    }
+    for row in coupons_rows:
+        item = dict(row)
+        isin = str(item.get("isin") or "").strip().upper()
+        coupon_date = str(item.get("coupon_date") or "")
+        if not isin or not coupon_date or coupon_date < as_of_iso:
+            continue
+        if isin in ofz_isins:
+            stats["ofz_coupons"] += 1
+        elif isin in corp_isins:
+            stats["corp_coupons"] += 1
+    return stats
+
+
+coupon_sync_breakdown = _build_coupon_sync_breakdown(pos_list, coupon_calendar, date.today())
+
+weighted_ytm_result = compute_weighted_ytm(
+    positions=pos_list,
+    ytm_by_isin={str(k or "").strip().upper(): v for k, v in ytm_by_isin.items()},
+)
+duration_result = compute_portfolio_duration(
+    positions=pos_list,
+    coupon_schedule=coupon_schedule_by_isin,
+    maturity_by_isin={str(k or "").strip().upper(): v for k, v in maturity_by_isin.items()},
+    amortization_schedule=amortization_schedule_by_isin,
+    ytm_by_isin={str(k or "").strip().upper(): v for k, v in ytm_by_isin.items()},
+    as_of_date=date.today(),
+)
+cashflow_forecast_12m = build_12m_cashflow_forecast(
+    positions=pos_list,
+    coupon_schedule=coupon_schedule_by_isin,
+    maturity_by_isin={str(k or "").strip().upper(): v for k, v in maturity_by_isin.items()},
+    amortization_schedule=amortization_schedule_by_isin,
+    dividend_schedule=dividend_schedule_by_isin,
+    bonds_total_value=weighted_ytm_result.bonds_total_value,
+    as_of_date=date.today(),
+)
+
 rating_distribution = build_rating_distribution(
     positions=pos_list,
     rating_by_isin=rating_by_isin,
@@ -721,6 +814,138 @@ with tab_overview:
                 )
             else:
                 st.info("Список бумаг с отсутствующими данными пуст.")
+
+    st.divider()
+    st.subheader("📊 Облигационный портфель")
+
+    duration_coverage = float(duration_result.coverage or 0.0)
+    ytm_coverage_new = float(weighted_ytm_result.coverage or 0.0)
+
+    duration_value_text = f"{duration_result.duration_years:.2f} года" if duration_result.duration_years is not None else "—"
+    ytm_value_text_new = f"{weighted_ytm_result.ytm:.2f}%" if weighted_ytm_result.ytm is not None else "—"
+
+    duration_delta = f"покрытие {duration_coverage * 100:.0f}%"
+    ytm_delta = f"покрытие {ytm_coverage_new * 100:.0f}%"
+    if duration_coverage < 0.5:
+        duration_delta = f"⚠️ {duration_delta}"
+    if ytm_coverage_new < 0.5:
+        ytm_delta = f"⚠️ {ytm_delta}"
+
+    reinvestment = cashflow_forecast_12m.reinvestment_risk
+    by_source = cashflow_forecast_12m.by_source
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Дюрация (Маколея)", duration_value_text, duration_delta)
+    with m2:
+        st.metric("Ср.-взв. YTM", ytm_value_text_new, ytm_delta)
+    with m3:
+        st.metric(
+            "Cash flow 12м",
+            f"{fmt(cashflow_forecast_12m.total)} ₽",
+            f"купоны {fmt(by_source.get('coupons', 0.0))} ₽, погаш. {fmt(by_source.get('maturities', 0.0))} ₽",
+        )
+    with m4:
+        st.metric(
+            "Погашения < 90 дней",
+            f"{fmt(reinvestment.days_90)} ₽",
+            f"{reinvestment.share_90 * 100:.0f}% облигаций",
+        )
+
+    if duration_coverage < 0.5 or ytm_coverage_new < 0.5:
+        st.caption("⚠️ Низкое покрытие данных — обновите справочники.")
+
+    forecast_df = pd.DataFrame(
+        [
+            {
+                "year_month": row.year_month,
+                "coupons": row.coupons,
+                "maturities": row.maturities,
+                "amortizations": row.amortizations,
+                "dividends": row.dividends,
+                "total": row.total,
+            }
+            for row in cashflow_forecast_12m.months
+        ]
+    )
+    if not forecast_df.empty:
+        fig_cf = go.Figure()
+        fig_cf.add_trace(
+            go.Bar(
+                name="Купоны",
+                x=forecast_df["year_month"],
+                y=forecast_df["coupons"],
+                marker_color="#3b82f6",
+            )
+        )
+        fig_cf.add_trace(
+            go.Bar(
+                name="Погашения",
+                x=forecast_df["year_month"],
+                y=forecast_df["maturities"],
+                marker_color="#10b981",
+            )
+        )
+        fig_cf.add_trace(
+            go.Bar(
+                name="Амортизации",
+                x=forecast_df["year_month"],
+                y=forecast_df["amortizations"],
+                marker_color="#14b8a6",
+            )
+        )
+        fig_cf.add_trace(
+            go.Bar(
+                name="Дивиденды",
+                x=forecast_df["year_month"],
+                y=forecast_df["dividends"],
+                marker_color="#8b5cf6",
+            )
+        )
+        fig_cf.add_trace(
+            go.Scatter(
+                x=forecast_df["year_month"],
+                y=forecast_df["total"],
+                mode="text",
+                text=forecast_df["total"].apply(lambda v: f"{v:,.0f} ₽"),
+                textposition="top center",
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+        fig_cf.update_layout(
+            barmode="stack",
+            xaxis_title="Месяц",
+            yaxis_title="₽",
+            margin=dict(t=24, b=24),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        )
+        st.plotly_chart(fig_cf, use_container_width=True)
+    else:
+        st.info("Нет данных для прогноза cash flow на 12 месяцев.")
+
+    rr1, rr2, rr3, rr4 = st.columns(4)
+    with rr1:
+        st.metric("30 дней", f"{fmt(reinvestment.days_30)} ₽", f"{reinvestment.share_30 * 100:.0f}%")
+    with rr2:
+        st.metric("90 дней", f"{fmt(reinvestment.days_90)} ₽", f"{reinvestment.share_90 * 100:.0f}%")
+    with rr3:
+        st.metric("180 дней", f"{fmt(reinvestment.days_180)} ₽", f"{reinvestment.share_180 * 100:.0f}%")
+    with rr4:
+        st.metric("365 дней", f"{fmt(reinvestment.days_365)} ₽", f"{reinvestment.share_365 * 100:.0f}%")
+
+    st.caption(
+        "Прогноз построен на основе текущих позиций. Налоги не учитываются. "
+        + f"Купоны (будущие): ОФЗ: {coupon_sync_breakdown['ofz_bonds']} бумаг, "
+        + f"{coupon_sync_breakdown['ofz_coupons']} купонов / "
+        + f"Корп: {coupon_sync_breakdown['corp_bonds']} бумаг, "
+        + f"{coupon_sync_breakdown['corp_coupons']} купонов. "
+        + format_sync_freshness_caption("Купоны (MOEX)", db.get_data_sync_freshness("coupon"))
+        + " | "
+        + format_sync_freshness_caption("Погашения (MOEX)", db.get_data_sync_freshness("maturity"))
+        + " | "
+        + format_sync_freshness_caption("Дивиденды (MOEX)", db.get_data_sync_freshness("dividend"))
+    )
 
     st.divider()
     st.subheader("🚨 Алерты портфеля")

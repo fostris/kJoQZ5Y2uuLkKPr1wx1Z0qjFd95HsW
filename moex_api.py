@@ -13,8 +13,10 @@ import json
 import time
 import logging
 import math
+import calendar
 from datetime import datetime, date
 from dataclasses import dataclass
+from urllib.parse import urlencode
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 
@@ -29,6 +31,7 @@ ISIN_SEARCH_CACHE_TTL_SEC = 3600
 FETCH_MAX_RETRIES = 3
 FETCH_RETRY_BACKOFF_SEC = 0.5
 MOEX_DATA_SOURCE = "moex_iss"
+COUPON_SYNC_FALLBACK_MONTHS = 36
 
 _YTM_CACHE: dict[str, tuple[float, float | None]] = {}
 _ISIN_TO_TICKER_CACHE: dict[str, str | None] = {}
@@ -258,15 +261,113 @@ def format_ytm(value: float | None) -> str:
     return f"{value:.2f}%"
 
 
-def get_bond_coupons(isin: str) -> list[CouponInfo]:
+def _parse_iso_date(value: str | None) -> date | None:
+    """Безопасный парсинг даты YYYY-MM-DD."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _add_months(value: date, months: int) -> date:
+    """Добавить месяцы к дате (без внешних зависимостей)."""
+    month_index = value.month - 1 + months
+    year = value.year + (month_index // 12)
+    month = (month_index % 12) + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _normalize_query_date(value: date | str | None) -> str | None:
+    """Нормализация даты для query-параметров ISS."""
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value.isoformat()
+    parsed = _parse_iso_date(str(value))
+    if parsed is not None:
+        return parsed.isoformat()
+    return None
+
+
+def _build_bondization_url(
+    security_id: str,
+    *,
+    from_date: date | str | None = None,
+    till_date: date | str | None = None,
+) -> str:
+    """Собрать URL bondization c периодом."""
+    params = {
+        "iss.meta": "off",
+        "limit": "1000",
+    }
+    normalized_from = _normalize_query_date(from_date)
+    normalized_till = _normalize_query_date(till_date)
+    if normalized_from:
+        params["from"] = normalized_from
+    if normalized_till:
+        params["till"] = normalized_till
+    return f"{MOEX_BASE}/securities/{security_id}/bondization.json?{urlencode(params)}"
+
+
+def _get_bondization_data(
+    isin: str,
+    *,
+    from_date: date | str | None = None,
+    till_date: date | str | None = None,
+) -> tuple[dict, str]:
+    """
+    Получить bondization-данные по ISIN с fallback на SECID.
+    Для ОФЗ MOEX часто возвращает данные только по SECID.
+    """
+    identifiers = [isin]
+    secid = get_ticker_by_isin(isin)
+    if secid and secid != isin:
+        identifiers.append(secid)
+
+    for idx, security_id in enumerate(identifiers):
+        url = _build_bondization_url(
+            security_id,
+            from_date=from_date,
+            till_date=till_date,
+        )
+        data = _fetch_json(url)
+        if not data:
+            continue
+
+        coupons_raw = _iss_to_rows(data, "coupons")
+        amort_raw = _iss_to_rows(data, "amortizations")
+        if coupons_raw or amort_raw:
+            if idx > 0:
+                logger.info(
+                    "Bondization resolved via SECID fallback: %s -> %s",
+                    isin,
+                    security_id,
+                )
+            return data, security_id
+
+    return {}, identifiers[-1]
+
+
+def get_bond_coupons(
+    isin: str,
+    *,
+    from_date: date | str | None = None,
+    till_date: date | str | None = None,
+) -> list[CouponInfo]:
     """
     Получить все купоны облигации по ISIN.
-    
-    Endpoint: /securities/{ISIN}/bondization.json
-    """
-    url = f"{MOEX_BASE}/securities/{isin}/bondization.json?iss.meta=off&limit=100"
-    data = _fetch_json(url)
 
+    Endpoint: /securities/{SECURITY_ID}/bondization.json
+    где SECURITY_ID = ISIN или SECID (fallback).
+    """
+    data, _used_id = _get_bondization_data(
+        isin,
+        from_date=from_date,
+        till_date=till_date,
+    )
     if not data:
         return []
 
@@ -283,25 +384,18 @@ def get_bond_coupons(isin: str) -> list[CouponInfo]:
             name=c.get("name", ""),
             coupon_date=coupon_date,
             record_date=c.get("recorddate", ""),
-            coupon_rate=c.get("valueprc") or 0.0,
-            coupon_amount=c.get("value") or 0.0,
-            nominal=c.get("facevalue") or 1000.0,
-            coupon_number=c.get("couponperiod") or 0,
+            coupon_rate=_to_float(c.get("valueprc")) or 0.0,
+            coupon_amount=_to_float(c.get("value")) or 0.0,
+            nominal=_to_float(c.get("facevalue")) or 1000.0,
+            coupon_number=int(_to_float(c.get("couponperiod")) or 0),
         ))
 
+    result.sort(key=lambda item: item.coupon_date)
     return result
 
 
-def get_bond_info(isin: str) -> dict:
-    """
-    Общая информация о бумаге: название, номинал, дата погашения.
-    """
-    url = f"{MOEX_BASE}/securities/{isin}.json?iss.meta=off"
-    data = _fetch_json(url)
-
-    if not data:
-        return {}
-
+def _parse_bond_description(data: dict) -> dict:
+    """Извлечь поля облигации из блока description ответа ISS."""
     description = _iss_to_rows(data, "description")
     info = {}
     for row in description:
@@ -319,6 +413,46 @@ def get_bond_info(isin: str) -> dict:
             info["issue_date"] = value
         elif name == "COUPONFREQUENCY":
             info["coupon_frequency"] = int(value) if value else 0
+    return info
+
+
+def get_bond_info(isin: str) -> dict:
+    """
+    Общая информация о бумаге: название, номинал, дата погашения.
+
+    Для ОФЗ endpoint /securities/{ISIN}.json может возвращать пустой
+    блок description. В этом случае резолвим ISIN → SECID и повторяем
+    запрос — по SECID данные приходят корректно.
+    """
+    url = f"{MOEX_BASE}/securities/{isin}.json?iss.meta=off&iss.only=description"
+    data = _fetch_json(url)
+    info = _parse_bond_description(data) if data else {}
+
+    if info.get("maturity_date"):
+        return info
+
+    # Fallback: пробуем через SECID (критично для ОФЗ).
+    secid = get_ticker_by_isin(isin)
+    if secid and secid != isin:
+        logger.info(
+            "MATDATE not found by ISIN %s, retrying with SECID %s",
+            isin, secid,
+        )
+        url_secid = f"{MOEX_BASE}/securities/{secid}.json?iss.meta=off&iss.only=description"
+        time.sleep(REQUEST_DELAY)
+        data_secid = _fetch_json(url_secid)
+        info_secid = _parse_bond_description(data_secid) if data_secid else {}
+
+        if info_secid.get("maturity_date"):
+            # Дополняем то, что уже получили по ISIN, данными по SECID.
+            for key, val in info_secid.items():
+                if val and not info.get(key):
+                    info[key] = val
+            return info
+
+    if not info.get("maturity_date"):
+        logger.warning("MATDATE unavailable for %s (SECID=%s)", isin, secid)
+        _record_sync_status("maturity", isin, "error", "MATDATE not found by ISIN or SECID")
 
     return info
 
@@ -333,14 +467,21 @@ class AmortizationInfo:
     value_prc: float       # % от номинала
 
 
-def get_bond_amortizations(isin: str) -> list[AmortizationInfo]:
+def get_bond_amortizations(
+    isin: str,
+    *,
+    from_date: date | str | None = None,
+    till_date: date | str | None = None,
+) -> list[AmortizationInfo]:
     """
     Получить расписание амортизаций облигации.
     Endpoint: /securities/{ISIN}/bondization.json → блок amortizations
     """
-    url = f"{MOEX_BASE}/securities/{isin}/bondization.json?iss.meta=off&limit=100"
-    data = _fetch_json(url)
-
+    data, _used_id = _get_bondization_data(
+        isin,
+        from_date=from_date,
+        till_date=till_date,
+    )
     if not data:
         return []
 
@@ -355,9 +496,9 @@ def get_bond_amortizations(isin: str) -> list[AmortizationInfo]:
         result.append(AmortizationInfo(
             isin=isin,
             amort_date=amort_date,
-            facevalue=a.get("facevalue") or 0.0,
-            initial_facevalue=a.get("initialfacevalue") or 1000.0,
-            value_prc=a.get("valueprc") or 0.0,
+            facevalue=_to_float(a.get("facevalue")) or 0.0,
+            initial_facevalue=_to_float(a.get("initialfacevalue")) or 1000.0,
+            value_prc=_to_float(a.get("valueprc")) or 0.0,
         ))
 
     return result
@@ -447,7 +588,8 @@ def sync_coupons_for_portfolio(positions: list, future_only: bool = True) -> dic
         dict со статистикой: {synced: int, skipped: int, errors: list}
     """
     stats = {"synced": 0, "skipped": 0, "errors": [], "bonds_processed": 0}
-    today = date.today().isoformat()
+    today_date = date.today()
+    today = today_date.isoformat()
 
     # Фильтруем только облигации
     bonds = [
@@ -470,7 +612,16 @@ def sync_coupons_for_portfolio(positions: list, future_only: bool = True) -> dic
         logger.info(f"Загрузка купонов: {name} ({isin})")
 
         try:
-            coupons = get_bond_coupons(isin)
+            horizon_end = _add_months(today_date, COUPON_SYNC_FALLBACK_MONTHS)
+            info = get_bond_info(isin)
+            maturity_date = _parse_iso_date(info.get("maturity_date"))
+            till_date = maturity_date or horizon_end
+            from_date = today_date if future_only else None
+            coupons = get_bond_coupons(
+                isin,
+                from_date=from_date,
+                till_date=till_date,
+            )
         except Exception as e:
             stats["errors"].append(f"{name}: {e}")
             _record_sync_status("coupon", isin, "error", str(e))
