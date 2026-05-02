@@ -12,7 +12,8 @@ from pathlib import Path
 
 from analytics.bonds import calculate_weighted_ytm, calculate_weighted_years_to_maturity
 from analytics.cashflows import build_coupon_cashflow_by_month, build_maturity_ladder
-from analytics.data_quality import build_attention_list, build_bond_data_quality_report
+from analytics.alerts import build_alerts, get_rule_label
+from analytics.data_quality import build_bond_data_quality_report
 from analytics.decision_scenarios import (
     REDUCE_FACTOR_LABELS,
     build_buy_candidates,
@@ -129,9 +130,6 @@ PREMIUM_FILTER_OPTIONS = {
     "discount": "Ниже номинала",
     "near par": "Около номинала",
 }
-ATTENTION_NEAR_MATURITY_DAYS = 90
-ATTENTION_LOSS_PCT_THRESHOLD = -10.0
-ATTENTION_LONG_MATURITY_YEARS = 7.0
 ATTENTION_CONCENTRATION_THRESHOLD = 0.10
 REBALANCE_TARGET_PRESETS = {
     "current_default": {
@@ -412,21 +410,27 @@ issuer_share_map = {
     row["issuer"]: row.get("issuer_share")
     for row in concentration_metrics["issuers"]
 }
-attention_list = build_attention_list(
+alerts_result = build_alerts(
     positions=pos_list,
-    position_share_map=position_share_map,
-    issuer_share_map=issuer_share_map,
-    issuer_map=issuer_by_isin,
-    ytm_map=ytm_by_isin,
-    maturity_by_isin=maturity_by_isin,
-    coupons=[dict(row) for row in coupon_calendar],
-    cost_basis=cost_basis_all,
+    concentration_data={
+        **concentration_metrics,
+        "position_hhi_target": concentration.MAX_POSITION_HHI,
+    },
+    data_quality_data={
+        "ytm_by_isin": ytm_by_isin,
+        "maturity_by_isin": maturity_by_isin,
+        "rating_by_isin": rating_by_isin,
+        "cost_basis": cost_basis_all,
+        "issuer_by_isin": {
+            _isin: (issuer_by_isin.get(_isin) or name)
+            for _isin, name in {
+                str(row.get("isin") or "").strip().upper(): str(row.get("name") or "")
+                for row in pos_list
+                if str(row.get("isin") or "").strip()
+            }.items()
+        },
+    },
     as_of_date=date.today(),
-    near_maturity_days_threshold=ATTENTION_NEAR_MATURITY_DAYS,
-    loss_pct_threshold=ATTENTION_LOSS_PCT_THRESHOLD,
-    long_maturity_years_threshold=ATTENTION_LONG_MATURITY_YEARS,
-    concentration_threshold=ATTENTION_CONCENTRATION_THRESHOLD,
-    bond_asset_types=BOND_ASSET_TYPES,
 )
 
 
@@ -719,57 +723,65 @@ with tab_overview:
                 st.info("Список бумаг с отсутствующими данными пуст.")
 
     st.divider()
-    st.subheader("🚨 Бумаги, требующие внимания")
-    if attention_list:
-        attention_df = pd.DataFrame(attention_list).copy()
-        attention_df["position_share"] = attention_df["position_share"].apply(
-            lambda v: v * 100 if v is not None else None
-        )
-        attention_df["issuer_share"] = attention_df["issuer_share"].apply(
-            lambda v: v * 100 if v is not None else None
-        )
-        attention_df["pnl_pct"] = attention_df["pnl_pct"].apply(
-            lambda v: f"{v:.1f}%" if v is not None else "нет данных"
-        )
-        attention_df["days_to_maturity"] = attention_df["days_to_maturity"].apply(
-            lambda v: int(v) if pd.notna(v) else "нет данных"
-        )
-        attention_df = attention_df.rename(
-            columns={
-                "name": "Инструмент",
-                "isin": "ISIN",
-                "severity": "Severity",
-                "reason": "Причины",
-                "suggested_action": "Рекомендуемое действие",
-                "position_share": "Доля позиции %",
-                "issuer_share": "Доля эмитента %",
-                "market_value": "Полная стоимость ₽",
-                "pnl_pct": "P&L %",
-                "days_to_maturity": "Дней до погашения",
-            }
-        )
-        st.caption(
-            f"Пороги: доля > {ATTENTION_CONCENTRATION_THRESHOLD * 100:.0f}%, "
-            f"погашение ≤ {ATTENTION_NEAR_MATURITY_DAYS} дней, "
-            f"убыток ≤ {ATTENTION_LOSS_PCT_THRESHOLD:.1f}%, "
-            f"срок > {ATTENTION_LONG_MATURITY_YEARS:.1f} лет."
-        )
-        st.dataframe(
-            attention_df[[
-                "Инструмент", "ISIN", "Severity", "Причины", "Рекомендуемое действие",
-                "Доля позиции %", "Доля эмитента %", "P&L %",
-                "Дней до погашения", "Полная стоимость ₽"
-            ]],
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "Доля позиции %": st.column_config.NumberColumn(format="%.2f%%"),
-                "Доля эмитента %": st.column_config.NumberColumn(format="%.2f%%"),
-                "Полная стоимость ₽": st.column_config.NumberColumn(format="%.2f ₽"),
-            },
-        )
-    else:
-        st.info("По текущим критериям бумаги, требующие внимания, не обнаружены.")
+    st.subheader("🚨 Алерты портфеля")
+
+    alerts_summary = alerts_result.summary
+    st.caption(
+        "🚨 Риск: "
+        f"{alerts_summary.get('risk_critical', 0)} критичных, "
+        f"{alerts_summary.get('risk_warning', 0)} предупреждений.  \n"
+        "📋 Данные: "
+        f"{alerts_summary.get('data_total', 0)} пробелов "
+        f"(critical: {alerts_summary.get('data_critical', 0)}, "
+        f"warning: {alerts_summary.get('data_warning', 0)}, "
+        f"info: {alerts_summary.get('data_info', 0)})."
+    )
+
+    def _severity_badge(severity: str) -> str:
+        if severity == "critical":
+            return "🔴 critical"
+        if severity == "warning":
+            return "🟡 warning"
+        return "🔵 info"
+
+    def _alerts_to_df(alerts_rows):
+        if not alerts_rows:
+            return pd.DataFrame(columns=["Severity", "Бумага", "ISIN", "Правило", "Детали"])
+        rows = []
+        for row in alerts_rows:
+            rows.append(
+                {
+                    "Severity": _severity_badge(row.severity),
+                    "Бумага": row.name or "—",
+                    "ISIN": row.isin or "—",
+                    "Правило": get_rule_label(row.rule_code),
+                    "Детали": row.message,
+                }
+            )
+        return pd.DataFrame(rows)
+
+    risk_alerts = alerts_result.risk_alerts
+    data_alerts = alerts_result.data_alerts
+
+    with st.expander(f"🚨 Алерты риска ({len(risk_alerts)})", expanded=False):
+        if risk_alerts:
+            st.dataframe(
+                _alerts_to_df(risk_alerts),
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.info("Алертов риска не обнаружено.")
+
+    with st.expander(f"📋 Алерты данных ({len(data_alerts)})", expanded=False):
+        if data_alerts:
+            st.dataframe(
+                _alerts_to_df(data_alerts),
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.info("Пробелов данных не обнаружено.")
 
     st.divider()
 
