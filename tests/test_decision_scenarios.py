@@ -185,6 +185,28 @@ class ReduceScenarioTests(unittest.TestCase):
 
         self.assertEqual(result["candidates"], [])
 
+    def test_stock_position_does_not_get_missing_ytm_factor(self):
+        positions = [
+            {"name": "Sberbank", "isin": "RU0009029540", "asset_type": "stock", "value_end": 1450.0, "nkd_end": 0.0},
+        ]
+        result = build_reduce_candidates(
+            positions=positions,
+            issuer_by_isin={"RU0009029540": "ПАО Сбербанк"},
+            ytm_by_isin={},
+            maturity_by_isin={},
+            rating_by_isin={},
+            position_share_map={"RU0009029540": 0.145},
+            issuer_share_map={},
+            data_quality_issue_isins=set(),
+            bond_asset_types=("bond_corp", "bond_ofz_pd", "bond_ofz_in"),
+            as_of_date=date(2026, 4, 28),
+        )
+
+        self.assertEqual(len(result["candidates"]), 1)
+        factor_codes = {factor["code"] for factor in result["candidates"][0]["factors"]}
+        self.assertNotIn("missing_ytm", factor_codes)
+        self.assertNotIn("missing_maturity", factor_codes)
+
 
 if __name__ == "__main__":
     unittest.main()

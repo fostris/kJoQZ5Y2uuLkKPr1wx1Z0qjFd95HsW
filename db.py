@@ -79,6 +79,60 @@ SCHEMA_MIGRATIONS: list[tuple[int, str, str]] = [
         );
         """,
     ),
+    (
+        6,
+        "normalize_conflicting_asset_types_by_isin",
+        """
+        WITH ranked_types AS (
+            SELECT
+                UPPER(TRIM(isin)) AS norm_isin,
+                asset_type,
+                COUNT(*) AS type_count,
+                ROW_NUMBER() OVER (
+                    PARTITION BY UPPER(TRIM(isin))
+                    ORDER BY
+                        COUNT(*) DESC,
+                        CASE asset_type
+                            WHEN 'stock' THEN 1
+                            WHEN 'etf' THEN 2
+                            WHEN 'bond_ofz_pd' THEN 3
+                            WHEN 'bond_ofz_in' THEN 4
+                            WHEN 'bond_corp' THEN 5
+                            ELSE 99
+                        END
+                ) AS rn
+            FROM positions
+            WHERE COALESCE(TRIM(isin), '') <> ''
+              AND asset_type IN ('stock', 'etf', 'bond_ofz_pd', 'bond_ofz_in', 'bond_corp')
+            GROUP BY UPPER(TRIM(isin)), asset_type
+        ),
+        conflicted_isins AS (
+            SELECT norm_isin
+            FROM ranked_types
+            GROUP BY norm_isin
+            HAVING COUNT(*) > 1
+        ),
+        selected_type AS (
+            SELECT r.norm_isin, r.asset_type
+            FROM ranked_types r
+            JOIN conflicted_isins c ON c.norm_isin = r.norm_isin
+            WHERE r.rn = 1
+        )
+        UPDATE positions
+        SET asset_type = (
+            SELECT st.asset_type
+            FROM selected_type st
+            WHERE st.norm_isin = UPPER(TRIM(positions.isin))
+        )
+        WHERE COALESCE(TRIM(isin), '') <> ''
+          AND UPPER(TRIM(isin)) IN (SELECT norm_isin FROM conflicted_isins)
+          AND asset_type <> (
+              SELECT st.asset_type
+              FROM selected_type st
+              WHERE st.norm_isin = UPPER(TRIM(positions.isin))
+          );
+        """,
+    ),
 ]
 
 

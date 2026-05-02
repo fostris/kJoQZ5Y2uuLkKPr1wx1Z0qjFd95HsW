@@ -139,8 +139,12 @@ def _classify_security(name: str, isin: str, sec_info: dict) -> str:
     nl = name.lower()
     if "etf" in nl or "бпиф" in nl:
         return "etf"
-    if any(x in nl for x in ["офз", "26", "29", "52"]):
+    # Раньше использовалась проверка подстроки "26/29/52", что могло ошибочно
+    # относить некоторые акции к облигациям при неполном справочнике.
+    if "офз" in nl or re.match(r"^(26|29|52)\d{3}\b", name.strip()):
         return "bond_ofz_pd"
+    if "облигац" in nl or "bond" in nl:
+        return "bond_corp"
     return "stock"
 
 
