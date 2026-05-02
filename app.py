@@ -38,7 +38,7 @@ from fire_metrics import build_fire_scenarios
 from formatters import format_rub
 from portfolio_metrics import (
     build_asset_type_aggregation,
-    calculate_overview_returns,
+    compute_period_returns,
     calculate_pnl_summary,
     calculate_total_nkd,
     calculate_total_portfolio_value,
@@ -1402,36 +1402,76 @@ with tab_overview:
     st.divider()
 
     # ─── Доходность портфеля ───
-    history = db.get_portfolio_history()
-    returns_summary = calculate_overview_returns(history, db.get_all_deposits())
-    returns_data = returns_summary["returns_data"]
-    if returns_data:
-        latest_val = returns_summary["latest_val"]
-        total_deposited_all = returns_summary["total_deposited_all"]
-        net_profit = returns_summary["net_profit"]
-        net_pct = returns_summary["net_pct"]
-        if latest_val is not None:
-            st.subheader("📈 Доходность портфеля")
-            cols = st.columns(min(len(returns_data), 4))
-            for i, (label, data) in enumerate(returns_data.items()):
-                with cols[i % len(cols)]:
-                    color = "normal" if data["abs"] >= 0 else "inverse"
-                    pct_str = f"{data['pct']:+.2f}%" if data["pct"] is not None else "—"
-                    st.metric(
-                        label,
-                        f"{data['abs']:+,.2f} ₽",
-                        pct_str,
-                        delta_color=color,
-                    )
+    report_date_dt = pd.to_datetime(selected_report["period_end"], format="%d.%m.%Y", errors="coerce")
+    if pd.notna(report_date_dt):
+        period_returns = compute_period_returns(
+            current_report_id=int(report_id),
+            current_value=float(selected_report["total_end"] or 0.0),
+            current_date=report_date_dt.date(),
+            historical_snapshots=[dict(row) for row in db.get_report_snapshots_summary()],
+            deposits=[dict(row) for row in db.get_all_deposits()],
+            withdrawals=db.get_external_withdrawals(),
+        )
 
-            # Абсолютная доходность (портфель минус все пополнения)
-            if total_deposited_all > 0 and net_profit is not None and net_pct is not None:
-                st.caption(
-                    f"💼 Абсолютная P&L: **{net_profit:+,.2f} ₽** ({net_pct:+.2f}%) — "
-                    f"портфель {fmt(latest_val)} ₽ минус внесено {fmt(total_deposited_all)} ₽"
+        st.subheader("📈 Доходность портфеля")
+        period_labels = [
+            ("day", "За день"),
+            ("week", "За неделю"),
+            ("month", "За месяц"),
+            ("3m", "За 3 месяца"),
+        ]
+        period_cols = st.columns(4)
+        for idx, (period_key, period_label) in enumerate(period_labels):
+            period_data = period_returns.get(period_key)
+            with period_cols[idx]:
+                if not period_data:
+                    st.metric(period_label, "—", "недостаточно данных")
+                    continue
+                abs_change = float(period_data.get("abs_change") or 0.0)
+                twr_pct = period_data.get("twr_pct")
+                twr_text = f"{twr_pct:+.2f}%" if twr_pct is not None else "—"
+                st.metric(
+                    period_label,
+                    f"{abs_change:+,.2f} ₽",
+                    twr_text,
+                    delta_color="normal" if abs_change >= 0 else "inverse",
                 )
+                if twr_pct is None:
+                    st.caption("TWR: —")
 
-            st.divider()
+        all_data = period_returns.get("all") or {}
+        all_abs_pnl = all_data.get("abs_pnl")
+        all_twr_pct = all_data.get("twr_pct")
+        all_net_contrib = all_data.get("net_contributions")
+
+        all_col1, all_col2 = st.columns(2)
+        with all_col1:
+            if all_abs_pnl is None:
+                st.metric("За всё время · Абсолютный P&L", "—")
+            else:
+                st.metric(
+                    "За всё время · Абсолютный P&L",
+                    f"{float(all_abs_pnl):+,.2f} ₽",
+                    (
+                        f"чистые пополнения {fmt(float(all_net_contrib or 0.0))} ₽"
+                        if all_net_contrib is not None
+                        else None
+                    ),
+                    delta_color="normal" if float(all_abs_pnl) >= 0 else "inverse",
+                )
+        with all_col2:
+            st.metric(
+                "За всё время · TWR",
+                f"{all_twr_pct:+.2f}%" if all_twr_pct is not None else "—",
+                (
+                    f"{all_data['start_date'].strftime('%d.%m.%Y')} → {all_data['end_date'].strftime('%d.%m.%Y')}"
+                    if all_data.get("start_date") and all_data.get("end_date")
+                    else "недостаточно данных"
+                ),
+            )
+
+        st.caption("Проценты по периодам рассчитаны по TWR (Modified Dietz) с нейтрализацией внешних потоков.")
+        st.divider()
 
     if not pos_df.empty:
         col_pie, col_bar = st.columns(2)

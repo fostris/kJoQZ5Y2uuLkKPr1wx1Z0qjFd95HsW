@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from datetime import date, datetime, timedelta
 from typing import Iterable, Mapping
 
 import pandas as pd
@@ -188,6 +189,248 @@ def calculate_overview_returns(
         "net_profit": net_profit,
         "net_pct": net_pct,
     }
+
+
+def _parse_date_value(value) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _normalize_flow_rows(
+    rows: Iterable[Mapping] | None,
+    *,
+    sign: float,
+) -> list[dict]:
+    normalized: list[dict] = []
+    for row in (rows or []):
+        flow_date = _parse_date_value(_row_get(row, "date"))
+        amount = _to_float(_row_get(row, "amount", 0))
+        if flow_date is None or amount is None or amount == 0:
+            continue
+        normalized.append(
+            {
+                "date": flow_date,
+                "amount": abs(float(amount)) * sign,
+            }
+        )
+    normalized.sort(key=lambda item: item["date"])
+    return normalized
+
+
+def _build_snapshot_rows(
+    historical_snapshots: list[dict],
+    current_report_id: int,
+    current_value: float,
+    current_date: date,
+) -> list[dict]:
+    snapshots: list[dict] = []
+    has_current_snapshot = False
+
+    for row in historical_snapshots or []:
+        snap_date = _parse_date_value(_row_get(row, "period_end") or _row_get(row, "date"))
+        snap_value = _to_float(_row_get(row, "total_value", _row_get(row, "total_end")))
+        snap_report_id = _row_get(row, "report_id")
+        if snap_date is None or snap_value is None:
+            continue
+        snap = {
+            "report_id": int(snap_report_id) if snap_report_id not in (None, "") else None,
+            "date": snap_date,
+            "total_value": float(snap_value),
+        }
+        snapshots.append(snap)
+        if snap["report_id"] == current_report_id:
+            has_current_snapshot = True
+
+    if not has_current_snapshot:
+        snapshots.append(
+            {
+                "report_id": int(current_report_id),
+                "date": current_date,
+                "total_value": float(current_value),
+            }
+        )
+
+    snapshots.sort(key=lambda item: (item["date"], item["report_id"] or -1))
+    return snapshots
+
+
+def _filter_flows_between(
+    flows: list[dict],
+    start_date: date,
+    end_date: date,
+) -> list[dict]:
+    return [row for row in flows if start_date < row["date"] <= end_date]
+
+
+def _modified_dietz_pct(
+    *,
+    start_value: float,
+    end_value: float,
+    start_date: date,
+    end_date: date,
+    cashflows: list[dict],
+) -> float | None:
+    if start_value == 0:
+        return None
+    if end_date <= start_date:
+        return None
+
+    total_flow = sum(float(row["amount"]) for row in cashflows)
+    abs_change = end_value - start_value - total_flow
+
+    if len(cashflows) == 1:
+        denominator = start_value + total_flow
+    else:
+        duration_days = max((end_date - start_date).days, 1)
+        weighted_flows = 0.0
+        for row in cashflows:
+            elapsed_days = (row["date"] - start_date).days
+            remaining_weight = (duration_days - elapsed_days) / duration_days
+            if remaining_weight < 0:
+                remaining_weight = 0.0
+            elif remaining_weight > 1:
+                remaining_weight = 1.0
+            weighted_flows += float(row["amount"]) * remaining_weight
+        denominator = start_value + weighted_flows
+
+    if denominator == 0:
+        return None
+    return abs_change / denominator * 100.0
+
+
+def compute_period_returns(
+    *,
+    current_report_id: int,
+    current_value: float,
+    current_date: date,
+    historical_snapshots: list[dict],
+    deposits: list[dict],
+    withdrawals: list[dict] | None = None,
+) -> dict[str, dict | None]:
+    """Доходность по периодам (day/week/month/3m/all) с нейтрализацией внешних потоков."""
+    period_days = {
+        "day": 1,
+        "week": 7,
+        "month": 30,
+        "3m": 90,
+    }
+    normalized_current_date = _parse_date_value(current_date)
+    if normalized_current_date is None:
+        return {**{key: None for key in period_days}, "all": None}
+
+    snapshots = _build_snapshot_rows(
+        historical_snapshots=historical_snapshots,
+        current_report_id=current_report_id,
+        current_value=current_value,
+        current_date=normalized_current_date,
+    )
+    snapshots = [row for row in snapshots if row["date"] <= normalized_current_date]
+    if not snapshots:
+        return {**{key: None for key in period_days}, "all": None}
+
+    end_snapshot = None
+    for row in snapshots:
+        if row["report_id"] == current_report_id:
+            end_snapshot = row
+            break
+    if end_snapshot is None:
+        end_snapshot = max(snapshots, key=lambda item: item["date"])
+
+    deposits_flows = _normalize_flow_rows(deposits, sign=1.0)
+    withdrawals_flows = _normalize_flow_rows(withdrawals, sign=-1.0)
+    all_flows = sorted(deposits_flows + withdrawals_flows, key=lambda item: item["date"])
+
+    result: dict[str, dict | None] = {}
+    for key, days in period_days.items():
+        target_start_date = end_snapshot["date"] - timedelta(days=days)
+        start_candidates = [
+            row for row in snapshots
+            if row["date"] <= target_start_date and row["date"] < end_snapshot["date"]
+        ]
+        if not start_candidates:
+            result[key] = None
+            continue
+        start_snapshot = max(start_candidates, key=lambda item: item["date"])
+        start_value = float(start_snapshot["total_value"])
+        end_value = float(end_snapshot["total_value"])
+
+        period_flows = _filter_flows_between(all_flows, start_snapshot["date"], end_snapshot["date"])
+        total_flow = sum(row["amount"] for row in period_flows)
+        abs_change = end_value - start_value - total_flow
+        twr_pct = _modified_dietz_pct(
+            start_value=start_value,
+            end_value=end_value,
+            start_date=start_snapshot["date"],
+            end_date=end_snapshot["date"],
+            cashflows=period_flows,
+        )
+
+        result[key] = {
+            "abs_change": abs_change,
+            "twr_pct": twr_pct,
+            "start_date": start_snapshot["date"],
+            "start_value": start_value,
+            "end_date": end_snapshot["date"],
+            "end_value": end_value,
+            "net_flow": total_flow,
+        }
+
+    deposits_total = sum(row["amount"] for row in deposits_flows if row["date"] <= end_snapshot["date"])
+    withdrawals_total = -sum(row["amount"] for row in withdrawals_flows if row["date"] <= end_snapshot["date"])
+    net_contributions = deposits_total - withdrawals_total
+    abs_pnl = float(end_snapshot["total_value"]) - net_contributions
+
+    chain_snapshots = [row for row in snapshots if row["date"] <= end_snapshot["date"]]
+    twr_all_pct: float | None = None
+    if len(chain_snapshots) >= 2:
+        twr_factor = 1.0
+        twr_defined = True
+        for idx in range(1, len(chain_snapshots)):
+            start_row = chain_snapshots[idx - 1]
+            end_row = chain_snapshots[idx]
+            segment_flows = _filter_flows_between(all_flows, start_row["date"], end_row["date"])
+            seg_pct = _modified_dietz_pct(
+                start_value=float(start_row["total_value"]),
+                end_value=float(end_row["total_value"]),
+                start_date=start_row["date"],
+                end_date=end_row["date"],
+                cashflows=segment_flows,
+            )
+            if seg_pct is None:
+                twr_defined = False
+                break
+            twr_factor *= (1.0 + seg_pct / 100.0)
+        if twr_defined:
+            twr_all_pct = (twr_factor - 1.0) * 100.0
+
+    first_snapshot = chain_snapshots[0]
+    result["all"] = {
+        "abs_pnl": abs_pnl,
+        "twr_pct": twr_all_pct,
+        "start_date": first_snapshot["date"],
+        "start_value": float(first_snapshot["total_value"]),
+        "end_date": end_snapshot["date"],
+        "end_value": float(end_snapshot["total_value"]),
+        "net_contributions": net_contributions,
+        "deposits_total": deposits_total,
+        "withdrawals_total": withdrawals_total,
+    }
+    return result
 
 
 def add_pnl_columns(positions_df: pd.DataFrame, cost_map: Mapping[str, Mapping]) -> pd.DataFrame:

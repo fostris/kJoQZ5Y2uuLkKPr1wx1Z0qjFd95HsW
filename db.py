@@ -474,6 +474,61 @@ def get_portfolio_history():
         ).fetchall()
 
 
+def get_report_snapshots_summary():
+    """Краткие снимки портфеля по отчётам: report_id, period_end, total_value."""
+    with get_db() as conn:
+        return conn.execute(
+            """
+            SELECT
+                r.id AS report_id,
+                r.period_end,
+                COALESCE(
+                    r.total_end,
+                    COALESCE(SUM(COALESCE(p.value_end, 0) + COALESCE(p.nkd_end, 0)), 0) + COALESCE(r.cash_end, 0),
+                    0
+                ) AS total_value
+            FROM reports r
+            LEFT JOIN positions p ON p.report_id = r.id
+            GROUP BY r.id, r.period_end, r.total_end, r.cash_end
+            ORDER BY substr(r.period_end,7,4)||substr(r.period_end,4,2)||substr(r.period_end,1,2)
+            """
+        ).fetchall()
+
+
+def get_external_withdrawals():
+    """Потенциальные внешние выводы из cash_flows (без сделок/комиссий/купонов)."""
+    include_keywords = ("вывод", "списание д/с", "списание дс", "перевод д/с", "перевод дс")
+    exclude_keywords = ("сделка", "комисси", "выплата", "купон", "дивиденд")
+
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT date, description, debit
+            FROM cash_flows
+            WHERE COALESCE(debit, 0) > 0
+            ORDER BY date
+            """
+        ).fetchall()
+
+    result = []
+    for row in rows:
+        description = str(row["description"] or "").strip().lower()
+        if not description:
+            continue
+        if any(token in description for token in exclude_keywords):
+            continue
+        if not any(token in description for token in include_keywords):
+            continue
+        result.append(
+            {
+                "date": row["date"],
+                "amount": float(row["debit"] or 0.0),
+                "description": row["description"],
+            }
+        )
+    return result
+
+
 def get_position_history(isin: str):
     """История конкретной позиции по всем отчётам."""
     with get_db() as conn:
