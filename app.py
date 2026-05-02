@@ -34,6 +34,7 @@ import db
 import moex_api
 import parser as bp
 from report_export import build_portfolio_summary_html
+from report_selection import resolve_default_report_id, should_switch_to_new_report
 from fire_metrics import build_fire_scenarios
 from formatters import format_rub
 from portfolio_metrics import (
@@ -226,6 +227,9 @@ with st.sidebar:
         help="Перетащите файл отчёта или выберите из папки",
     )
 
+    reports_before_import = db.get_all_reports()
+    previous_max_period_end = reports_before_import[0]["period_end"] if reports_before_import else None
+
     if uploaded:
         # Сохраняем временно
         reports_dir = Path(__file__).parent / "reports"
@@ -240,6 +244,9 @@ with st.sidebar:
                 st.success(f"✅ Импортирован: {report.period_end}")
                 st.metric("Портфель", f"{fmt(report.total_end)} ₽",
                           f"{report.total_change:+,.2f} ₽")
+                if should_switch_to_new_report(report.period_end, previous_max_period_end):
+                    st.session_state["selected_report_id"] = int(report_id)
+                st.rerun()
             elif report_id == -1:
                 st.info(f"ℹ️ Отчёт за {report.period_end} уже загружен")
         except Exception as e:
@@ -251,11 +258,23 @@ with st.sidebar:
     all_reports = db.get_all_reports()
     if all_reports:
         st.subheader(f"📋 Отчёты ({len(all_reports)})")
-        report_dates = [r["period_end"] for r in all_reports]
-        selected_date = st.selectbox(
+        report_ids = [int(r["id"]) for r in all_reports]
+        report_labels = {
+            int(r["id"]): str(r["period_end"] or "")
+            for r in all_reports
+        }
+        default_report_id = resolve_default_report_id([dict(r) for r in all_reports])
+
+        if "selected_report_id" not in st.session_state:
+            st.session_state["selected_report_id"] = default_report_id
+        elif st.session_state["selected_report_id"] not in report_ids:
+            st.session_state["selected_report_id"] = default_report_id
+
+        st.selectbox(
             "Выберите дату отчёта",
-            report_dates,
-            index=0,
+            report_ids,
+            format_func=lambda rid: report_labels.get(int(rid), f"ID {rid}"),
+            key="selected_report_id",
         )
     else:
         st.warning("Загрузите первый HTML-отчёт брокера ↑")
@@ -270,14 +289,22 @@ if not latest:
 
 # Находим выбранный отчёт
 selected_report = None
+selected_report_id = st.session_state.get("selected_report_id")
 for r in all_reports:
-    if r["period_end"] == selected_date:
+    if int(r["id"]) == int(selected_report_id):
         selected_report = r
         break
 
 if not selected_report:
-    st.error("Отчёт не найден")
-    st.stop()
+    fallback_report_id = resolve_default_report_id([dict(r) for r in all_reports])
+    if fallback_report_id is None:
+        st.error("Отчёт не найден")
+        st.stop()
+    st.session_state["selected_report_id"] = int(fallback_report_id)
+    selected_report = next((r for r in all_reports if int(r["id"]) == int(fallback_report_id)), None)
+    if not selected_report:
+        st.error("Отчёт не найден")
+        st.stop()
 
 report_id = selected_report["id"]
 positions = db.get_positions(report_id)

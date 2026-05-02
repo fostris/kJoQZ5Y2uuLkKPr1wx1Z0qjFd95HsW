@@ -422,7 +422,13 @@ def get_latest_report():
     """Последний импортированный отчёт."""
     with get_db() as conn:
         return conn.execute(
-            "SELECT * FROM reports ORDER BY substr(period_end,7,4)||substr(period_end,4,2)||substr(period_end,1,2) DESC LIMIT 1"        ).fetchone()
+            """
+            SELECT *
+            FROM reports
+            ORDER BY substr(period_end,7,4)||substr(period_end,4,2)||substr(period_end,1,2) DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
 
 
 def get_positions(report_id: int):
@@ -546,7 +552,11 @@ def get_all_reports():
     """Список всех отчётов."""
     with get_db() as conn:
         return conn.execute(
-            "SELECT * FROM reports ORDER BY period_end DESC"
+            """
+            SELECT *
+            FROM reports
+            ORDER BY substr(period_end,7,4)||substr(period_end,4,2)||substr(period_end,1,2) DESC, id DESC
+            """
         ).fetchall()
 
 
