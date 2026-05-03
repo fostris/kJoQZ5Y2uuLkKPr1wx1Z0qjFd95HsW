@@ -11,6 +11,16 @@ from datetime import datetime
 
 DB_PATH = Path(__file__).parent / "portfolio.db"
 
+PORTFOLIO_TARGET_DEFAULTS: dict[str, tuple[float, str]] = {
+    "position_max_pct": (0.07, "Максимальная доля одной позиции"),
+    "issuer_max_pct": (0.10, "Максимальная доля одного эмитента"),
+    "sector_max_pct": (0.30, "Максимальная доля одного сектора"),
+    "duration_min_years": (1.5, "Минимальная целевая дюрация"),
+    "duration_max_years": (3.5, "Максимальная целевая дюрация"),
+    "ytm_min_for_buy": (0.16, "Минимальная YTM для рассмотрения покупки облигации"),
+    "target_monthly_cashflow": (0.0, "Целевой ежемесячный cash flow (0 = не задан)"),
+}
+
 SCHEMA_MIGRATIONS: list[tuple[int, str, str]] = [
     (1, "baseline_schema_snapshot", ""),
     (
@@ -131,6 +141,32 @@ SCHEMA_MIGRATIONS: list[tuple[int, str, str]] = [
               FROM selected_type st
               WHERE st.norm_isin = UPPER(TRIM(positions.isin))
           );
+        """,
+    ),
+    (
+        7,
+        "add_portfolio_targets",
+        """
+        CREATE TABLE IF NOT EXISTS portfolio_targets (
+            key TEXT PRIMARY KEY,
+            value REAL NOT NULL,
+            description TEXT DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT OR IGNORE INTO portfolio_targets (key, value, description) VALUES
+            ('position_max_pct', 0.07, 'Максимальная доля одной позиции');
+        INSERT OR IGNORE INTO portfolio_targets (key, value, description) VALUES
+            ('issuer_max_pct', 0.10, 'Максимальная доля одного эмитента');
+        INSERT OR IGNORE INTO portfolio_targets (key, value, description) VALUES
+            ('sector_max_pct', 0.30, 'Максимальная доля одного сектора');
+        INSERT OR IGNORE INTO portfolio_targets (key, value, description) VALUES
+            ('duration_min_years', 1.5, 'Минимальная целевая дюрация');
+        INSERT OR IGNORE INTO portfolio_targets (key, value, description) VALUES
+            ('duration_max_years', 3.5, 'Максимальная целевая дюрация');
+        INSERT OR IGNORE INTO portfolio_targets (key, value, description) VALUES
+            ('ytm_min_for_buy', 0.16, 'Минимальная YTM для рассмотрения покупки облигации');
+        INSERT OR IGNORE INTO portfolio_targets (key, value, description) VALUES
+            ('target_monthly_cashflow', 0.0, 'Целевой ежемесячный cash flow (0 = не задан)');
         """,
     ),
 ]
@@ -384,8 +420,27 @@ def init_db():
                 note TEXT DEFAULT '',
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS portfolio_targets (
+                key TEXT PRIMARY KEY,
+                value REAL NOT NULL,
+                description TEXT DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
         """)
+        _ensure_portfolio_target_defaults(conn)
         apply_migrations(conn)
+
+
+def _ensure_portfolio_target_defaults(conn: sqlite3.Connection) -> None:
+    for key, (value, description) in PORTFOLIO_TARGET_DEFAULTS.items():
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO portfolio_targets (key, value, description, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            """,
+            (key, value, description),
+        )
 
 
 def import_report(report) -> int:
@@ -1023,6 +1078,56 @@ def set_rebalance_targets(targets: dict):
             )
 
 
+# ─── Portfolio Targets ───
+
+def get_portfolio_targets() -> dict[str, float]:
+    """Целевая модель портфеля (key -> value)."""
+    with get_db() as conn:
+        _ensure_portfolio_target_defaults(conn)
+        rows = conn.execute(
+            "SELECT key, value FROM portfolio_targets ORDER BY key"
+        ).fetchall()
+        return {str(row["key"]): float(row["value"]) for row in rows}
+
+
+def set_portfolio_target(key: str, value: float) -> None:
+    """Обновить одно значение целевой модели портфеля."""
+    normalized_key = str(key or "").strip()
+    if not normalized_key:
+        raise ValueError("key is required")
+    normalized_value = float(value)
+
+    default_description = PORTFOLIO_TARGET_DEFAULTS.get(normalized_key, (0.0, ""))[1]
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO portfolio_targets (key, value, description, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(key) DO UPDATE SET
+                value=excluded.value,
+                updated_at=datetime('now')
+            """,
+            (normalized_key, normalized_value, default_description),
+        )
+
+
+def reset_portfolio_targets_to_defaults() -> None:
+    """Вернуть значения целевой модели к дефолтам."""
+    with get_db() as conn:
+        for key, (value, description) in PORTFOLIO_TARGET_DEFAULTS.items():
+            conn.execute(
+                """
+                INSERT INTO portfolio_targets (key, value, description, updated_at)
+                VALUES (?, ?, ?, datetime('now'))
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value,
+                    description=excluded.description,
+                    updated_at=datetime('now')
+                """,
+                (key, value, description),
+            )
+
+
 # ─── Bond Maturities ───
 
 def upsert_bond_maturity(isin: str, name: str, maturity_date: str,
@@ -1097,7 +1202,9 @@ def get_cost_basis_all():
 def get_cost_basis_map():
     """Словарь ISIN → avg_price."""
     with get_db() as conn:
-        rows = conn.execute("SELECT isin, avg_price, total_qty, total_cost FROM cost_basis").fetchall()
+        rows = conn.execute(
+            "SELECT isin, avg_price, total_qty, total_cost, source FROM cost_basis"
+        ).fetchall()
         return {r["isin"]: dict(r) for r in rows}
 
 

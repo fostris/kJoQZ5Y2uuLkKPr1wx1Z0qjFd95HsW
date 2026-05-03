@@ -39,6 +39,7 @@ from analytics.ratings import (
     RATING_BUCKET_UNRATED,
     build_rating_distribution,
 )
+from analytics.target_model import Targets, compute_target_deviations
 import concentration
 import db
 import moex_api
@@ -156,6 +157,24 @@ REBALANCE_TARGET_PRESETS = {
         },
     },
 }
+TARGET_MODEL_KEY_CONFIG = {
+    "position_max_pct": {"label": "Максимальная доля позиции, %", "step": 0.1, "is_pct": True},
+    "issuer_max_pct": {"label": "Максимальная доля эмитента, %", "step": 0.1, "is_pct": True},
+    "sector_max_pct": {"label": "Максимальная доля сектора, %", "step": 0.5, "is_pct": True},
+    "duration_min_years": {"label": "Минимальная дюрация, лет", "step": 0.1, "is_pct": False},
+    "duration_max_years": {"label": "Максимальная дюрация, лет", "step": 0.1, "is_pct": False},
+    "ytm_min_for_buy": {"label": "Минимальная YTM для покупки, %", "step": 0.1, "is_pct": True},
+    "target_monthly_cashflow": {"label": "Целевой monthly cash flow, ₽", "step": 1_000.0, "is_pct": False},
+}
+TARGET_DEVIATION_TYPE_LABELS = {
+    "position_concentration": "Концентрация позиции",
+    "issuer_concentration": "Концентрация эмитента",
+    "sector_concentration": "Концентрация сектора",
+    "duration_below": "Дюрация ниже минимума",
+    "duration_above": "Дюрация выше максимума",
+    "ytm_below_min_buy": "YTM ниже min для покупки",
+    "asset_allocation": "Отклонение структуры активов",
+}
 
 try:
     from fire_metrics import SCENARIO_PRESETS as FIRE_SCENARIO_PRESETS
@@ -217,6 +236,45 @@ def load_bond_issuer_map(isins: tuple[str, ...]) -> dict[str, str | None]:
             continue
         issuer_map[isin] = moex_api.get_issuer_by_isin(isin)
     return issuer_map
+
+
+def _normalize_share_target(value: float | int | None) -> float | None:
+    if value is None:
+        return None
+    out = float(value)
+    return out / 100.0 if out > 1.0 else out
+
+
+def _severity_icon(severity: str) -> str:
+    return {
+        "critical": "🔴 critical",
+        "warning": "🟡 warning",
+        "info": "🔵 info",
+    }.get(str(severity), "🔵 info")
+
+
+def _format_share(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value * 100:.2f}%"
+
+
+def _format_pp(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value:+.2f} п.п."
+
+
+def _format_years_delta(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value:+.2f} г."
+
+
+def _format_correction_signed(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value:+,.0f} ₽".replace(",", " ")
 
 
 # ─── Сайдбар ───
@@ -503,6 +561,67 @@ issuer_share_map = {
     row["issuer"]: row.get("issuer_share")
     for row in concentration_metrics["issuers"]
 }
+portfolio_total_value = float(concentration_metrics.get("total_portfolio_value") or 0.0)
+
+issuer_reference_by_key = {
+    str(name).strip().lower(): row
+    for name, row in issuer_reference_map.items()
+}
+sector_by_isin: dict[str, str | None] = {}
+for row in pos_list:
+    isin = str(row.get("isin") or "").strip().upper()
+    if not isin:
+        continue
+    asset_type = str(row.get("asset_type") or "").strip()
+    issuer_name = concentration.normalize_bond_issuer(
+        issuer_by_isin.get(isin),
+        asset_type,
+    )
+    ref = issuer_reference_by_key.get(str(issuer_name).strip().lower())
+    sector_name = str((ref or {}).get("sector") or "").strip()
+    sector_by_isin[isin] = sector_name or None
+
+portfolio_targets_values = {
+    key: float(default_value)
+    for key, (default_value, _) in db.PORTFOLIO_TARGET_DEFAULTS.items()
+}
+portfolio_targets_values.update({
+    key: float(value)
+    for key, value in db.get_portfolio_targets().items()
+})
+target_model_targets = Targets(
+    position_max_pct=float(portfolio_targets_values["position_max_pct"]),
+    issuer_max_pct=float(portfolio_targets_values["issuer_max_pct"]),
+    sector_max_pct=float(portfolio_targets_values["sector_max_pct"]),
+    duration_min_years=float(portfolio_targets_values["duration_min_years"]),
+    duration_max_years=float(portfolio_targets_values["duration_max_years"]),
+    ytm_min_for_buy=float(portfolio_targets_values["ytm_min_for_buy"]),
+    target_monthly_cashflow=float(portfolio_targets_values["target_monthly_cashflow"]),
+)
+
+positions_for_target_model = []
+for row in pos_list:
+    item = dict(row)
+    isin = str(item.get("isin") or "").strip().upper()
+    if isin:
+        item["ytm"] = ytm_by_isin.get(isin)
+    positions_for_target_model.append(item)
+
+target_deviations_result = compute_target_deviations(
+    positions=positions_for_target_model,
+    concentration_data=concentration_metrics,
+    duration_result=duration_result,
+    weighted_ytm_result={
+        "ytm_by_isin": {str(k or "").strip().upper(): v for k, v in ytm_by_isin.items()}
+    },
+    issuer_by_isin={str(k or "").strip().upper(): str(v or "") for k, v in issuer_by_isin.items()},
+    sector_by_isin=sector_by_isin,
+    asset_type_targets=db.get_rebalance_targets(),
+    targets=target_model_targets,
+    portfolio_total_value=portfolio_total_value,
+    as_of_date=date.today(),
+)
+
 alerts_result = build_alerts(
     positions=pos_list,
     concentration_data={
@@ -545,8 +664,15 @@ st.divider()
 # ВКЛАДКИ
 # ═══════════════════════════════════════════════
 
-tab_overview, tab_positions, tab_deposits, tab_calendar, tab_rebalance, tab_trades, tab_fire = st.tabs([
-    "📊 Обзор", "📋 Позиции", "💰 Пополнения и вычет", "📅 Календарь", "⚖️ Ребалансировка", "🔄 Сделки", "🔥 FIRE"
+tab_overview, tab_positions, tab_deposits, tab_calendar, tab_rebalance, tab_target_model, tab_trades, tab_fire = st.tabs([
+    "📊 Обзор",
+    "📋 Позиции",
+    "💰 Пополнения и вычет",
+    "📅 Календарь",
+    "⚖️ Ребалансировка",
+    "🎯 Целевая модель",
+    "🔄 Сделки",
+    "🔥 FIRE",
 ])
 
 
@@ -3384,6 +3510,192 @@ with tab_rebalance:
                 без необходимости продажи других позиций.
             </div>
             """, unsafe_allow_html=True)
+
+
+# ─── TAB: ЦЕЛЕВАЯ МОДЕЛЬ ───
+with tab_target_model:
+    st.subheader("🎯 Целевая модель портфеля")
+
+    model_summary = target_deviations_result.summary
+    s1, s2, s3, s4 = st.columns(4)
+    with s1:
+        st.metric("Всего отклонений", model_summary.get("total", 0))
+    with s2:
+        st.metric("Critical", model_summary.get("critical", 0))
+    with s3:
+        st.metric("Warning", model_summary.get("warning", 0))
+    with s4:
+        st.metric("Info", model_summary.get("info", 0))
+
+    deviations = target_deviations_result.deviations
+    by_type: dict[str, list] = {}
+    for item in deviations:
+        by_type.setdefault(item.type, []).append(item)
+
+    st.divider()
+    st.markdown("### 1) Текущее состояние vs цель")
+
+    largest_position_share = concentration_metrics.get("largest_position_share")
+    largest_issuer_share = concentration_metrics.get("largest_issuer_share")
+    duration_value = duration_result.duration_years
+    ytm_value = weighted_ytm_result.ytm
+    ytm_value_norm = _normalize_share_target(ytm_value)
+
+    top_position = by_type.get("position_concentration", [None])[0]
+    top_issuer = by_type.get("issuer_concentration", [None])[0]
+    top_sector = by_type.get("sector_concentration", [None])[0]
+    top_asset = by_type.get("asset_allocation", [None])[0]
+    duration_dev = (by_type.get("duration_below") or by_type.get("duration_above") or [None])[0]
+    ytm_dev = by_type.get("ytm_below_min_buy", [None])[0]
+
+    state_rows = [
+        {
+            "Параметр": "Доля позиции",
+            "Цель": _format_share(target_model_targets.position_max_pct),
+            "Текущее значение": _format_share(top_position.current_value if top_position else largest_position_share),
+            "Отклонение": _format_pp(top_position.delta_pp if top_position else None),
+            "Severity": _severity_icon(top_position.severity if top_position else "info"),
+        },
+        {
+            "Параметр": "Доля эмитента",
+            "Цель": _format_share(target_model_targets.issuer_max_pct),
+            "Текущее значение": _format_share(top_issuer.current_value if top_issuer else largest_issuer_share),
+            "Отклонение": _format_pp(top_issuer.delta_pp if top_issuer else None),
+            "Severity": _severity_icon(top_issuer.severity if top_issuer else "info"),
+        },
+        {
+            "Параметр": "Доля сектора",
+            "Цель": _format_share(target_model_targets.sector_max_pct),
+            "Текущее значение": _format_share(top_sector.current_value if top_sector else None),
+            "Отклонение": _format_pp(top_sector.delta_pp if top_sector else None),
+            "Severity": _severity_icon(top_sector.severity if top_sector else "info"),
+        },
+        {
+            "Параметр": "Дюрация портфеля",
+            "Цель": f"{target_model_targets.duration_min_years:.2f}–{target_model_targets.duration_max_years:.2f} г.",
+            "Текущее значение": f"{duration_value:.2f} г." if duration_value is not None else "—",
+            "Отклонение": _format_years_delta(duration_dev.delta_abs if duration_dev else None),
+            "Severity": _severity_icon(duration_dev.severity if duration_dev else "info"),
+        },
+        {
+            "Параметр": "YTM фильтр покупки",
+            "Цель": _format_share(target_model_targets.ytm_min_for_buy),
+            "Текущее значение": _format_share(ytm_value_norm),
+            "Отклонение": _format_pp(ytm_dev.delta_pp if ytm_dev else None),
+            "Severity": _severity_icon(ytm_dev.severity if ytm_dev else "info"),
+        },
+        {
+            "Параметр": "Структура активов",
+            "Цель": "rebalance_targets",
+            "Текущее значение": top_asset.name if top_asset else "—",
+            "Отклонение": _format_pp(top_asset.delta_pp if top_asset else None),
+            "Severity": _severity_icon(top_asset.severity if top_asset else "info"),
+        },
+    ]
+    st.dataframe(pd.DataFrame(state_rows), hide_index=True, use_container_width=True)
+
+    st.divider()
+    st.markdown("### 2) Список отклонений")
+
+    if deviations:
+        deviation_rows = []
+        for item in deviations:
+            if item.type in {"duration_below", "duration_above"}:
+                current_value_text = f"{item.current_value:.2f} г."
+                target_value_text = f"{item.target_value:.2f} г."
+                delta_text = _format_years_delta(item.delta_abs)
+            else:
+                current_value_text = _format_share(item.current_value)
+                target_value_text = _format_share(item.target_value)
+                delta_text = _format_pp(item.delta_pp)
+
+            deviation_rows.append(
+                {
+                    "Severity": _severity_icon(item.severity),
+                    "Тип": TARGET_DEVIATION_TYPE_LABELS.get(item.type, item.type),
+                    "Имя": item.name,
+                    "Текущее": current_value_text,
+                    "Цель": target_value_text,
+                    "Отклонение": delta_text,
+                    "Корректировка ₽": _format_correction_signed(item.correction_amount_rub),
+                }
+            )
+        st.dataframe(pd.DataFrame(deviation_rows), hide_index=True, use_container_width=True)
+    else:
+        st.success("Отклонений от целевой модели не найдено.")
+
+    st.divider()
+    st.markdown("### 3) Покрытие данных")
+
+    sector_total_positions = 0
+    for row in positions_for_target_model:
+        market_value = concentration.calculate_position_market_value(row)
+        if market_value is not None and market_value > 0:
+            sector_total_positions += 1
+    sector_unknown_count = int(target_deviations_result.coverage.sector_unknown_count)
+    sector_known_count = max(sector_total_positions - sector_unknown_count, 0)
+    sector_coverage = float(target_deviations_result.coverage.sector_coverage or 0.0)
+    duration_coverage = float(target_deviations_result.coverage.duration_coverage or 0.0)
+
+    st.caption(
+        f"Сектор: данные есть для {sector_known_count} из {sector_total_positions} бумаг "
+        f"({sector_coverage * 100:.1f}% портфеля). Секторный лимит проверен только по этим бумагам."
+    )
+    st.caption(f"Дюрация: покрытие {duration_coverage * 100:.1f}% облигационного портфеля.")
+    if sector_coverage < 0.5:
+        st.caption(
+            "⚠️ Низкое покрытие данных по секторам. "
+            "После запуска синхронизации секторов отклонения будут точнее."
+        )
+
+    st.divider()
+    st.markdown("### 4) Настройка целей")
+    with st.expander("⚙️ Настройка целевой модели", expanded=False):
+        input_values: dict[str, float] = {}
+        current_target_values = db.get_portfolio_targets()
+        for key, (default_value, _description) in db.PORTFOLIO_TARGET_DEFAULTS.items():
+            config = TARGET_MODEL_KEY_CONFIG.get(
+                key,
+                {"label": key, "step": 0.1, "is_pct": False},
+            )
+            raw_value = float(current_target_values.get(key, default_value))
+            if bool(config.get("is_pct")):
+                display_value = raw_value * 100.0
+                min_value = 0.0
+                max_value = 100.0
+            else:
+                display_value = raw_value
+                min_value = 0.0
+                max_value = None
+
+            input_values[key] = st.number_input(
+                str(config.get("label")),
+                min_value=min_value,
+                max_value=max_value,
+                value=float(display_value),
+                step=float(config.get("step", 0.1)),
+                key=f"target_model_input_{key}",
+            )
+
+        save_col, reset_col = st.columns(2)
+        with save_col:
+            if st.button("Сохранить", use_container_width=True, key="save_target_model"):
+                min_duration_value = float(input_values["duration_min_years"])
+                max_duration_value = float(input_values["duration_max_years"])
+                if min_duration_value > max_duration_value:
+                    st.error("duration_min_years не может быть больше duration_max_years.")
+                else:
+                    for key, entered_value in input_values.items():
+                        is_pct = bool(TARGET_MODEL_KEY_CONFIG.get(key, {}).get("is_pct"))
+                        normalized_value = (float(entered_value) / 100.0) if is_pct else float(entered_value)
+                        db.set_portfolio_target(key, normalized_value)
+                    st.success("Цели целевой модели сохранены.")
+                    st.rerun()
+        with reset_col:
+            if st.button("Сбросить к default", use_container_width=True, key="reset_target_model"):
+                db.reset_portfolio_targets_to_defaults()
+                st.success("Цели сброшены к default.")
+                st.rerun()
 
 
 # ─── TAB: СДЕЛКИ ───
